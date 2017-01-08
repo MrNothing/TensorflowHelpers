@@ -1,6 +1,9 @@
 # TensorflowHelpers
 Helper tools I use to work with tensorflow
 
+dependecies:
+```tensorflow, pydub, soundfile, pickle```
+
 Examples:
 
 - Minst classifier
