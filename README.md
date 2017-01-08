@@ -29,9 +29,9 @@ network.Run()
 
 - Deezer classifier
 ```python
-from extractor import *
-from deezer_tools import *
-from neural_network import *
+from helpers.extractor import *
+from helpers.deezer_tools import *
+from helpers.neural_network import *
 
 loader = DeezerLoader(sample_size=1/256)
 network = ConvNet(loader)
@@ -41,9 +41,9 @@ network.Run()
 
 - Customize layers:
 ```python
-from extractor import *
-from deezer_tools import *
-from neural_network import *
+from helpers.extractor import *
+from helpers.deezer_tools import *
+from helpers.neural_network import *
 
 layers = []
 layers.append(NNOperation("reshape", [-1, 28, 28, 1]))
