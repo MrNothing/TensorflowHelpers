@@ -6,7 +6,6 @@ Examples:
 - Minst classifier
 ```python
 from helpers.extractor import *
-from helpers.deezer_tools import *
 from helpers.neural_network import *
 
 loader = MinstLoader("data/minst_folder/")
@@ -18,7 +17,6 @@ network.Run()
 - Cifar classifier
 ```python
 from helpers.extractor import *
-from helpers.deezer_tools import *
 from helpers.neural_network import *
 
 loader = CifarLoader("data/cifar10", "Grayscale")
@@ -42,7 +40,6 @@ network.Run()
 - Customize graph:
 ```python
 from helpers.extractor import *
-from helpers.deezer_tools import *
 from helpers.neural_network import *
 
 layers = []
@@ -66,7 +63,6 @@ network.Run(layers)
 - Load and Save graph:
 ```python
 from helpers.extractor import *
-from helpers.deezer_tools import *
 from helpers.neural_network import *
 
 loader = CifarLoader("data/cifar10", "Grayscale")
