@@ -39,7 +39,7 @@ network = ConvNet(loader)
 network.Run()
 ```
 
-- Customize layers:
+- Customize graph:
 ```python
 from helpers.extractor import *
 from helpers.deezer_tools import *
@@ -59,6 +59,18 @@ layers.append(NNOperation("wx+b", [1024, 10], [10]))
 
 loader = CifarLoader("data/cifar10", "Grayscale")
 network = ConvNet(loader)
+
+network.Run(layers)
+```
+
+- Load and Save graph:
+```python
+from helpers.extractor import *
+from helpers.deezer_tools import *
+from helpers.neural_network import *
+
+loader = CifarLoader("data/cifar10", "Grayscale")
+network = ConvNet(loader, save_path="graphs/tensorflow_inception_graph.pb", restore_path="graphs/tensorflow_inception_graph.pb")
 
 network.Run(layers)
 ```
