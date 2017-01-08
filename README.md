@@ -69,7 +69,7 @@ from helpers.extractor import *
 from helpers.neural_network import *
 
 loader = CifarLoader("data/cifar10", "Grayscale")
-network = ConvNet(loader, save_path="graphs/tensorflow_inception_graph.pb", restore_path="graphs/tensorflow_inception_graph.pb")
+network = ConvNet(loader, save_path="graphs/model.ckpt", restore_path="graphs/model.ckpt")
 
 network.Run(layers)
 ```
