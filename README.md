@@ -1,5 +1,5 @@
 # TensorflowHelpers
-Helper tools I use to work with tensorflow
+Helper tools I made to work with tensorflow
 
 dependecies:
 ```tensorflow, pydub, soundfile, pickle```
