@@ -132,12 +132,13 @@ class SoundImage:
         return self.width*self.height
 
 class SoundConverter:
-     def __init__(self, path, isUrl=False):
+     def __init__(self, path="", isUrl=False):
          self.path = path
          self.isUrl = isUrl
-         data, samplerate = sf.read(self.path)
-         self.data = data
-         self.samplerate = samplerate
+         if len(path)>0:
+             data, samplerate = sf.read(self.path)
+             self.data = data
+             self.samplerate = samplerate
          
      def ExtractSamples(self, samples_count=10, offset=127, multiplier=2048, ratio=1, as_tensors=False):
          result = []
@@ -157,6 +158,35 @@ class SoundConverter:
 
          return (self.SoundToImage(fixed_size=fixed_size, compress=False, offset=offset, multiplier=multiplier, ratio=ratio, sample_range=sample_range, log=False, as_tensors=as_tensors, limiter=limiter))
 
+     def ExtractBlurrySample(self, start=0, length=256*256, offset=127, multiplier=2048, ratio=1):
+         data = self.data
+         samplerate = self.samplerate
+         sample_begin = start
+         sample_end = start+length
+         
+         i = [0]*length
+
+         index = 0
+         
+         #blurried part...
+         while index<length:
+             i[index] = self.getAvgFrame(start/length, int(index/start))
+            
+             index+=1
+         
+         #clear part
+         index = sample_begin
+         
+         while index<sample_end:
+             i.append(min(1, ((data[index][0]+data[index][1])/2*multiplier+offset)/255))
+            
+             index+=1
+         
+         return i
+        
+     def getAvgFrame(_range, index):
+         todo=0
+         
      def SoundToImage(self, fixed_size=-1, limiter=99999999999, compress=False, offset=127, multiplier=2048, ratio=1, sample_range=[0,1], log=True, as_tensors=False):
 
          data = self.data
@@ -234,12 +264,20 @@ class SoundConverter:
          data = []
          index = 0
          while index<len(tensor):
-            pixel = tensor[index]
+            pixel = tensor[index]            
             data.append([pixel*multiplier, pixel*multiplier])
             index+=1
             
          sf.write(path, data, samplerate)
          print("Sound saved as: "+path)
+         
+     def reshapeAsSequence(self, data, sequences=1):
+         new_len = int(len(data)/sequences)
+         new_data = []
+         for i in range(sequences):
+                 new_data.append(data[i*new_len:(i+1)*new_len])
+                 
+         return new_data
 
 class CifarLoader:
 
@@ -298,6 +336,7 @@ class CifarLoader:
 
         imagesData = []
         labels = []
+        flipped = []
 
         for i in range(amount):
             fileID = 0
@@ -313,8 +352,9 @@ class CifarLoader:
             imgObj = self.loadOneImage(imgID, fileID)
             imagesData.append(imgObj["image"])
             labels.append(imgObj["label"])
+            flipped.append(imgObj["flipped"])
 
-        return [imagesData, labels]
+        return [imagesData, labels, flipped]
 
     def getTestBatch(self, amount):
         imagesData = []
@@ -339,7 +379,9 @@ class CifarLoader:
                 pixel = (self.testData["data"][index][byte]+self.testData["data"][index][self.IMG_SIZE+byte]+self.testData["data"][index][self.IMG_SIZE*2+byte])/3
                 _image.append(pixel/255)
         else:
-            _image = self.testData["data"][index]
+             for byte in range(self.IMG_SIZE*3):
+                pixel = self.testData["data"][index][byte]
+                _image.append(pixel/255)
 
         _label = [0]*10
         _label[self.testData["labels"][index]] = 1
@@ -348,25 +390,47 @@ class CifarLoader:
 
     def loadOneImage(self, index, fileID=0):
         _image = []
+    
+        flipped=rand.choice([0, 2]);
+        staturation = rand.uniform(-10.0, 10.0)
+
         if self.format=="Grayscale":
             for byte in range(self.IMG_SIZE):
-                pixel = (self.data[fileID]["data"][index][byte]+self.data[fileID]["data"][index][self.IMG_SIZE+byte]+self.data[fileID]["data"][index][self.IMG_SIZE*2+byte])/3
-                _image.append(pixel/255)
+                if flipped:
+                   pixel = (self.data[fileID]["data"][index][self.IMG_SIZE-byte-1]+self.data[fileID]["data"][index][self.IMG_SIZE+byte]+self.data[fileID]["data"][index][self.IMG_SIZE*3-byte-1])/3
+                else:
+                   pixel = (self.data[fileID]["data"][index][byte]+self.data[fileID]["data"][index][self.IMG_SIZE+byte]+self.data[fileID]["data"][index][self.IMG_SIZE*2+byte])/3
+                _image.append(max(0, min(255, pixel+staturation))/255)
         else:
-            _image = self.data[fileID]["data"][index]
+           for byte in range(self.IMG_SIZE*3):
+                if flipped==1:
+                   pixel = (self.data[fileID]["data"][index][self.IMG_SIZE-byte-1])
+                elif flipped==2:
+                   color_channel = int(byte/(32*32))*32*32
+                   local = byte-color_channel
+                   x = 32-local%32-1
+                   y = 32-int(local/32)
+                   pixel = (self.data[fileID]["data"][index][color_channel+local])
+                else:
+                   pixel = self.data[fileID]["data"][index][byte]
+                _image.append((pixel+staturation)/255)
 
         _label = [0]*10
         _label[self.data[fileID]["labels"][index]] = 1
         
-        return {"image":_image, "label":_label}
+        return {"image":_image, "label":_label, "flipped": flipped}
 
     def getImageBytes(self):
-        if self.format=="RGB":
-            return self.IMG_SIZE*3
-        else:
+        if self.format=="Grayscale":
             return self.IMG_SIZE
+        else:
+            return self.IMG_SIZE*3
+        
     def getImageWidth(self):
-        return int(np.sqrt(self.IMG_SIZE))
+        if self.format=="Grayscale":
+            return int(np.sqrt(self.IMG_SIZE))
+        else:
+            return int(np.sqrt(self.IMG_SIZE*3))
 
     def getImagesCount(self):
         return self.IMAGES_PER_FILE*self.FILES_AMOUNT
@@ -376,6 +440,13 @@ class CifarLoader:
         for i in range(self.FILES_AMOUNT):
             count+= self.data[i]["training_state"]
         return count
+        
+    def rangeFactor(t, point, _range):
+        ratio = np.abs (point - t) / _range;
+        if ratio < 1:
+            return 1 - ratio;
+        else:
+            return 0;
 
 class MinstLoader:
     def __init__(self, path="inputs/datasets/MNIST_data/"):
