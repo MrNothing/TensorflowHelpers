@@ -101,14 +101,10 @@ from helpers.neural_network import *
 
 loader = CifarLoader("inputs/datasets/cifar10/", "RGB")
 network = ConvNet(loader, 
-                  n_steps=3*32,
                   training_iters=100000, 
                   display_step=1, 
                   learning_rate = 0.001, 
                   batch_size=128)
-
-
-x=tf.placeholder("float", [None, 3*32, 32])
 
 layers = []
 layers.append(NNOperation("reshape", [-1, 32*3, 32, 1]))
@@ -119,5 +115,5 @@ layers.append(NNOperation("maxpool2d", 2)) #8
 layers.append(NNOperation("reshape", [-1, 24*64, 8]))
 
 layers.append(LSTMOperation(cells=[32], n_classes=network.n_classes))
-network.Run(x=x, layers=layers, save_path="graphs/Cifar10Graph")
+network.Run(layers=layers, save_path="graphs/Cifar10Graph")
 ```
