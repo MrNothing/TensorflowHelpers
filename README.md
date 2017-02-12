@@ -74,7 +74,7 @@ network = ConvNet(loader, save_path="graphs/model.ckpt", restore_path="graphs/mo
 network.Run(layers)
 ```
 
-- MultiLayer LSTM Example:
+- MultiLayer Dynamic LSTM Example:
 ```python
 from helpers.extractor import *
 from helpers.neural_network import *
