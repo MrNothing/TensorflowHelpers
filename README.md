@@ -110,7 +110,7 @@ layers = []
 layers.append(NNOperation("reshape", [-1, 32*3, 32, 1]))
 layers.append(NNOperation("conv2d", [3, 3, 1, 32]))
 layers.append(NNOperation("maxpool2d", 2)) #16
-layers.append(NNOperation("conv2d", [3, 3, 32, 32]))
+layers.append(NNOperation("conv2d", [3, 3, 32, 64]))
 layers.append(NNOperation("maxpool2d", 2)) #8
 layers.append(NNOperation("reshape", [-1, 24*64, 8]))
 
