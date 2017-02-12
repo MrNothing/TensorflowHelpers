@@ -73,3 +73,24 @@ network = ConvNet(loader, save_path="graphs/model.ckpt", restore_path="graphs/mo
 
 network.Run(layers)
 ```
+
+- LSTM Example:
+```python
+from helpers.extractor import *
+from helpers.neural_network import *
+
+loader = CifarLoader("inputs/datasets/cifar10/", "RGB")
+network = ConvNet(loader, 
+                  n_steps=32*3,
+                  training_iters=100000, 
+                  display_step=1, 
+                  learning_rate = 0.001, 
+                  batch_size=128)
+
+
+layers = []
+layers.append(LSTMOperation(cells=[1024, 256, 10], n_classes=network.n_classes))
+
+x=tf.placeholder("float", [None, 3*32, 32])
+network.Run(x=x, layers=layers, save_path="graphs/Cifar10Graph")
+```
