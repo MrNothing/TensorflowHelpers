@@ -94,3 +94,51 @@ layers.append(LSTMOperation(cells=[1024, 256, 10], n_classes=network.n_classes))
 x=tf.placeholder("float", [None, 3*32, 32])
 network.Run(x=x, layers=layers, save_path="graphs/Cifar10Graph")
 ```
+- Conv-LSTM graph:
+```python
+from helpers.extractor import *
+from helpers.deezer_tools import *
+from helpers.neural_network import *
+
+loader = DeezerLoader(fixed_size=128*128+32, 
+                      sample_size=1/16, 
+                      local=True, 
+                      #limit_genres=[113],
+                      limit_track=15781392, 
+                      limit_genres=[113, 152], 
+                      other_genres_rate=0, 
+                      #rating_labels=True,
+                      label_is_input = True,
+                      #insert_global_input_state = True,
+                      LABELS_COUNT = 32)
+
+loader.shuffle_rate = 1
+#loader.picker.FixAllTracks()
+
+network = ConvNet(loader, 
+                  n_steps=8*64,
+                  training_iters=100000, 
+                  display_step=1, 
+                  learning_rate = 0.001, 
+                  batch_size=32)
+print(network.n_input)
+print(network.n_classes)
+
+x=tf.placeholder("float", [None, 8*64, 32])
+
+layers = []
+layers.append(NNOperation("reshape", [-1, 128, 128, 1]))
+layers.append(NNOperation("conv2d", [3, 3, 1, 32]))
+layers.append(NNOperation("maxpool2d", 2)) #64
+layers.append(NNOperation("conv2d", [3, 3, 32, 32]))
+layers.append(NNOperation("maxpool2d", 2)) #32
+layers.append(NNOperation("conv2d", [3, 3, 32, 32]))
+layers.append(NNOperation("maxpool2d", 2)) #16
+layers.append(NNOperation("conv2d", [3, 3, 32, 64]))
+layers.append(NNOperation("maxpool2d", 2)) #8
+layers.append(NNOperation("reshape", [-1, 8*64, 8]))
+
+layers.append(LSTMOperation(cells=[1024], n_classes=network.n_classes))
+
+network.Run(layers=layers, x=x, save_path="graphs/DeezerLSTMGraph")
+```
