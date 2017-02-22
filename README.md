@@ -69,7 +69,7 @@ from helpers.extractor import *
 from helpers.neural_network import *
 
 loader = CifarLoader("data/cifar10", "Grayscale")
-network = ConvNet(loader, save_path="graphs/model.ckpt", restore_path="graphs/model.ckpt")
+network = ConvNet(loader, save_path="graphs/Cifar10Graph", restore_path="graphs/Cifar10Graph")
 
 network.Run(layers)
 ```
