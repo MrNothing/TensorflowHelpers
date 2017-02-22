@@ -10,7 +10,8 @@ import random as rand
 from random import *
 from urllib import request
 from pathlib import Path
-from helpers.extractor import SoundConverter
+from helpers.sound_tools import SoundConverter
+from helpers.sound_tools import Encoder
 import numpy as np
 import pickle
 import os
@@ -27,7 +28,10 @@ class DeezerLoader:
                  limit_track=-1, 
                  other_genres_rate=0.5, 
                  rating_labels=False,
-                 label_is_input=False
+                 label_is_input=False,
+                 insert_global_input_state = False,
+                 encoding = "None",
+                 extract_length = -1
                  ):
         self.LABELS_COUNT = LABELS_COUNT
         self.sample_size = sample_size
@@ -39,6 +43,9 @@ class DeezerLoader:
         self.rating_labels = rating_labels
         self.limit_track = limit_track
         self.label_is_input = label_is_input
+        self.insert_global_input_state = insert_global_input_state
+        self.encoding = encoding
+        self.extract_length = extract_length
           
         if rating_labels or label_is_input:
             self.LABELS_COUNT = LABELS_COUNT
@@ -55,6 +62,12 @@ class DeezerLoader:
             self.image_width = int(np.sqrt(len(converter.ExtractRandomSample(sample_size=sample_size, multiplier=256))))
         else:
             self.image_width = int(np.sqrt(fixed_size))
+    
+    def getTestTimeBatch(self, 
+                         batch_size, 
+                         shuffle_rate=-1, 
+                         n_steps=32):
+        return self.getNextTimeBatch(batch_size, shuffle_rate, n_steps)
             
     def getNextTimeBatch(self, 
                          batch_size, 
@@ -105,23 +118,39 @@ class DeezerLoader:
             if self.fixed_size>0:
                 limiter = self.fixed_size
             
-            image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=256, limiter=limiter)
+            image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=128, limiter=limiter, offset=128)
             
             limiter = self.image_width
             if self.fixed_size>0:
                 limiter = int(np.sqrt(self.fixed_size))
             
             if self.label_is_input:
-                labels.append(image[len(image)-self.LABELS_COUNT:len(image)])
-                images.append(converter.reshapeAsSequence(image[0:len(image)-self.LABELS_COUNT], n_steps))
+                label = image[len(image)-self.extract_length:len(image)]
+                
+                if self.encoding == "OneHot":
+                    label = Encoder.OneHot(label, self.LABELS_COUNT)
+
+                labels.append(label)
+                
+                image = converter.reshapeAsSequence(image[0:len(image)-self.extract_length], n_steps)
+                
+                if self.insert_global_input_state:
+                    image.append([converter.last_sample_position]*len(image[0]))
+                    
+                images.append(image)
             else:
                 image = converter.reshapeAsSequence(image, n_steps)
             
-            
+                if self.insert_global_input_state:
+                    image.append([converter.last_sample_position]*len(image[0]))
+                
                 if len(image)!=limiter:
                     raise Exception("sample length was: "+str(len(image))+" expected: "+str(limiter))
                 
                 label = [0]*self.LABELS_COUNT
+
+                if self.encoding == "OneHot":
+                    label = Encoder.OneHot(label, self.LABELS_COUNT)
     
                 if self.rating_labels:
                     label = [0, 0]
@@ -204,7 +233,7 @@ class DeezerLoader:
                 raise Exception("sample length was: "+str(len(image))+" expected: "+str(limiter))
             
             label = [0]*self.LABELS_COUNT
-
+        
             if self.rating_labels:
                 label = [0, 0]
                 if track.__contains__("rank") and track["rank"]>=0:
@@ -216,6 +245,10 @@ class DeezerLoader:
                     match+=1
                 else:
                     i-=1
+                    
+                if self.encoding == "OneHot":
+                    label = Encoder.OneHot(label, self.LABELS_COUNT)
+            
                     
             elif len(self.limit_genres)==0:
                 label[track["genre"]] = 1
