@@ -28,18 +28,6 @@ network = ConvNet(loader)
 network.Run()
 ```
 
-- Deezer classifier (Notebook: https://github.com/MrNothing/TensorflowHelpers/blob/master/Music%20Classification.ipynb)
-```python
-from helpers.extractor import *
-from helpers.deezer_tools import *
-from helpers.neural_network import *
-
-loader = DeezerLoader(sample_size=1/256)
-network = ConvNet(loader)
-
-network.Run()
-```
-
 - Customize graph:
 ```python
 from helpers.extractor import *
