@@ -7,6 +7,7 @@ Created on Mon Feb 13 22:11:47 2017
 
 import os
 import io
+from multiprocessing import Process, Lock, Manager, Value
 import pydub
 import requests
 from random import *
@@ -21,9 +22,51 @@ import soundfile as sf
 from PIL import Image
 from matplotlib.pyplot import imshow
 from IPython.display import clear_output, display, HTML
+import _thread as thread
+import time
+import pickle
+from os import listdir
 
 deezer_api_url = "http://api.deezer.com/"
 
+class SoundCombiner:
+    def __init__(self, loaders):
+        self.loaders = loaders
+        self.LABELS_COUNT = loaders[0].LABELS_COUNT
+        self.fixed_size = loaders[0].fixed_size
+        self.converter = loaders[0].converter
+        self.sample_shape = loaders[0].sample_shape
+        self.batch_size = loaders[0].batch_size
+        self.n_steps = loaders[0].n_steps
+        self.label_offset = loaders[0].label_offset
+        self.uLawEncode = loaders[0].uLawEncode
+        self.samplerate = loaders[0].samplerate
+        self.one_hot = loaders[0].one_hot
+        self.insert_global_input_state = loaders[0].insert_global_input_state
+        self.extract_length = loaders[0].extract_length
+        self.sample_steps = loaders[0].sample_steps
+        self.entropy = loaders[0].entropy
+        self.image_width = loaders[0].image_width
+        self.pool = []
+        
+    def getTestTimeBatch(self, 
+                         batch_size, 
+                         shuffle_rate=-1, 
+                         n_steps=32):
+        return self.getNextTimeBatch(batch_size, shuffle_rate, n_steps)
+            
+    def getNextTimeBatch(self, batch_size, 
+                         shuffle_rate=-1, 
+                         n_steps=32):
+        return rand.choice(self.loaders).getNextTimeBatch(batch_size, shuffle_rate, n_steps)
+    
+    def getImageBytes(self):
+        if self.fixed_size>0:
+            return self.fixed_size
+        else:
+            return self.image_width*self.image_width
+    def getImageWidth(self):
+        return self.image_width 
 class SoundLoader:
     def __init__(self, 
                  sound,
@@ -40,11 +83,28 @@ class SoundLoader:
                  multiplier = 1,
                  amplitude = 1,
                  label_offset = 0,
+                 sample_shape = [], #[[2, 20, 200]]*64
+                 n_steps = 16,
+                 batch_size = 128,
+                 n_threads = 0,
+                 max_pool = 200,
+                 entropy = None #{"step":1, "increase_rate":0, "max_step":50, "size":64},
                  ):
         self.sound = sound
         self.log = log
         self.random = random
         self.label_offset = label_offset
+        self.sample_shape = sample_shape
+        self.entropy = entropy
+        
+        if self.entropy!=None:
+            step = self.entropy["step"]
+            state = 0
+            for k in range(self.entropy["size"]):
+                state+=step
+                if step<self.entropy["max_step"]:
+                    step+=self.entropy["increase_rate"]
+            print ("Entropy range: "+str(state)+" frames.")
         
         if(LABELS_COUNT!=-1):
             self.LABELS_COUNT = LABELS_COUNT
@@ -56,6 +116,13 @@ class SoundLoader:
         
         self.converter = SoundConverter(sound)
         self.converter.resample(samplerate)
+        
+        #if len(sample_shape)>0:
+        #    for sample_r in sample_shape[0]:
+        #        self.converter.resample_as_clone(sample_r)
+        self.use_avg = False
+        self.sample_avg = -1
+        
         self.insert_global_input_state = insert_global_input_state
         self.one_hot = one_hot
         
@@ -90,6 +157,30 @@ class SoundLoader:
         
         self.extract_log = []
         self.samplerate = samplerate
+        
+        self.pool = []
+        self.raw_pool = None
+        
+        self.active_threads = 0
+        self.max_threads = 4
+        self.running = True
+        self.batch_size = batch_size
+        self.n_steps = n_steps
+        self.n_threads = n_threads
+        if n_threads!=0:
+            self.max_pool = max_pool/n_threads
+        else:
+            self.max_pool = max_pool
+            
+        self.cache_file="temp/sound_pool/"
+        self.file_counter = 0
+        self.use_file_system = False
+        
+        lock = Lock()
+        for k in range(n_threads):
+            thread.start_new_thread(self.factory_generate_samples, (lock, self.batch_size, self.n_steps, k, self.raw_pool))
+            print ("Thread started, id: "+str(k))
+            
     
     def getExtract(self, startRatio, length):
         return self.converter.SoundToImage(compress=False, offset=self.multiplier/2, multiplier=self.multiplier*self.amplitude, ratio=1, sample_range=[startRatio, 1], uLawEncode = self.uLawEncode, log=False, as_tensors=True)
@@ -104,6 +195,49 @@ class SoundLoader:
                          batch_size, 
                          shuffle_rate=-1, 
                          n_steps=32):
+        if self.n_threads>0:
+            if self.use_file_system:
+                while len(listdir(self.cache_file))==0:
+                    wait = 0
+                    
+                file_name = listdir(self.cache_file)[self.file_counter]
+                self.file_counter+=1
+                if os.path.exists(self.cache_file+file_name):
+                    data = None
+                    f = open(self.cache_file+file_name, 'rb')
+                    data = pickle.load(f)
+                    #os.remove(self.cache_file+file_name)
+                    return data
+            else:
+                while True:
+                    if len(self.pool)>0:
+                        return self.pool.pop(0)
+                   
+        else:
+            self.thread_getNextTimeBatch(batch_size, shuffle_rate, n_steps)
+            return self.pool.pop(0)
+                
+    def factory_generate_samples(self, lock, batch_size, steps, _id, raw_pool):
+        self.thread_tmp = 0
+        while self.running:
+            if self.use_file_system:
+                if len(listdir(self.cache_file))<self.max_pool:
+                    self.thread_getNextTimeBatch(batch_size, -1, steps, lock, _id, raw_pool)
+                    time.sleep(0.01)
+            else:
+                if len(self.pool)<self.max_pool:
+                    self.thread_getNextTimeBatch(batch_size, -1, steps, lock, _id, raw_pool)
+                    
+        print("Thread stopped: "+str(_id))
+        
+    def thread_getNextTimeBatch(self, 
+                         batch_size, 
+                         shuffle_rate=-1, 
+                         n_steps=32,
+                         lock=None,
+                         _id = None, 
+                         raw_pool = None):
+            
         images = []
         labels = []
 
@@ -116,7 +250,8 @@ class SoundLoader:
                 image = converter.ExtractRandomSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
             else:
                 image = converter.ExtractNextSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
-                
+            
+            last_start_index = converter.last_start_index
                 
             label = image[len(image)-self.extract_length:len(image)]
             
@@ -125,23 +260,105 @@ class SoundLoader:
                 
             labels.append(label)
             
+            #print("init: "+str(converter.last_start_index)+" len: "+str(len(image[0:len(image)-self.extract_length-self.label_offset])))
+            
             image = converter.reshapeAsSequence(image[0:len(image)-self.extract_length-self.label_offset], n_steps)
-            
-            self.extract_log.append(converter.last_sample_position)
-            
-            if self.insert_global_input_state!=-1:
-                if self.uLawEncode!=-1:
-                    image = [[Encoder.uLawEncode(converter.last_sample_position, self.uLawEncode)]*len(image[0])]*self.insert_global_input_state+image
-                else:
-                    image = [[converter.last_sample_position]*len(image[0])]*self.insert_global_input_state+image
+            offset = 0
+            if len(self.sample_shape)!=0:
+                samples = []
+                sample_length = len(self.sample_shape)
+                for sample_range in self.sample_shape[0]:
                     
+                    sample = []
+                    for frame_id in range(sample_length):
+                        if self.use_avg:
+                            val = 0
+                            small_sample = converter.Extract(last_start_index-offset-sample_range, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                            #process small_sample
+                            if self.sample_avg>0:
+                                val = Encoder.avg(small_sample, self.sample_avg)
+                            else:
+                                if self.uLawEncode!=-1:
+                                    val = np.average(small_sample)
+                                else:
+                                    val = Encoder.uLawEncode(np.average(small_sample), self.uLawEncode)
+                            sample.append(val)
+                        else:
+                            small_sample = converter.Extract(last_start_index-offset-1, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                            #process small_sample
+                            val = small_sample[0]
+                            sample.append(val)
+                        
+                        offset += sample_range
+                    
+                    sample = converter.reshapeAsSequence(sample, n_steps)
+                    
+                    samples = sample + samples
+                    
+                image = samples + image
+            elif self.entropy != None:
+                size = self.entropy["size"]
+                step = self.entropy["step"]
+                increase_rate = self.entropy["increase_rate"]
+                max_step = self.entropy["max_step"]
+                
+                offset = 0
+                sample = []
+
+                for k in range(size):
+                    small_sample = converter.Extract(last_start_index-offset-step, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                    
+                    val = 0
+                    if self.sample_avg>0:
+                        val = Encoder.avg(small_sample, self.sample_avg)
+                    else:
+                        if self.uLawEncode!=-1:
+                            val = Encoder.entropy(small_sample)
+                        else:
+                            val = Encoder.uLawEncode(Encoder.entropy(small_sample), self.uLawEncode)
+                    
+                    sample.insert(0, val) 
+                    
+                    offset += step 
+                    if step<max_step:
+                        step+=increase_rate
+                        
+                #sample = np.flip(sample, 0).tolist()
+                sample = converter.reshapeAsSequence(sample, n_steps)
+                self.debug_offset = offset
+                self.debug_max_step = step
+                image = sample + image
+            else:
+                if self.insert_global_input_state!=-1:
+                    if self.uLawEncode!=-1:
+                        image = [[Encoder.uLawEncode(converter.last_sample_position, self.uLawEncode)]*len(image[0])]*self.insert_global_input_state+image
+                    else:
+                        image = [[converter.last_sample_position]*len(image[0])]*self.insert_global_input_state+image
+            if lock==None:
+                self.extract_log.append(converter.last_sample_position)
+                     
                 
             images.append(image)
         
-        if self.log:
-            print("extracted "+str(len(images))+" samples from "+self.sound)
-        
-        return [images, labels]
+        if lock!=None:
+            lock.acquire()
+            if self.log:
+                print("pool: "+str(self.thread_tmp)+" extracted "+str(len(images))+" samples from "+self.sound)
+            
+            if self.use_file_system:
+                #instance.pool.append([images, labels])
+                with open(self.cache_file+"_t_"+str(_id)+"_"+str(self.thread_tmp), 'wb') as f:
+                    pickle.dump([images, labels], f, pickle.HIGHEST_PROTOCOL)
+                    f.close()
+                self.thread_tmp+=1
+            else:
+                self.pool.append([images, labels])
+            lock.release()
+        else:
+            if self.log:
+                print("extracted "+str(len(images))+" samples from "+self.sound)
+                
+            self.pool.append([images, labels])
 
     def getTestBatch(self, 
                          batch_size, 
@@ -173,6 +390,15 @@ class SoundLoader:
             image = image[0:self.fixed_size-self.extract_length]
             
             self.extract_log.append(converter.last_sample_position)
+            
+            if len(self.sample_shape)!=0:
+                samples = []
+                for clone_id in self.sample_shape[0]:
+                    sample = converter.ExtractFromClone(clone_id, converter.last_start_index-len(self.sample_shape), converter.last_start_index, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                    
+                    samples = samples + sample
+                    
+                image = samples + image
             
             if self.insert_global_input_state:
                 if self.uLawEncode!=-1:
@@ -321,6 +547,8 @@ class SoundConverter:
          self.path = path
          self.isUrl = isUrl
          self.state = 0
+         self.clones = {}
+         self.flat_data = None
          
          if len(path)>0:
              data, samplerate = sf.read(self.path)
@@ -402,6 +630,8 @@ class SoundConverter:
          samplerate = self.samplerate
          
          sample_begin = int(len(data)*sample_range[0])
+         self.last_start_index = sample_begin
+         
          sample_end = int(len(data)*sample_range[1])
          if fixed_size>0:
              sample_end = sample_begin+fixed_size
@@ -498,6 +728,88 @@ class SoundConverter:
                  
          return new_data
          
+     def Extract(self, start_frame, end_frame, offset=127, multiplier=2048, uLawEncode = -1):
+         data = self.getFlatData(offset, multiplier, uLawEncode)
+         extract = data[start_frame:end_frame]
+         sample_len = end_frame-start_frame
+         
+         if len(extract)<sample_len:
+             extract = [0.5]*(sample_len-len(extract))+extract
+            
+         return extract
+         
+     def getFlatData(self, offset=127, multiplier=2048, uLawEncode = -1):
+         if self.flat_data==None:
+             self.flat_data = []
+             for i in range(len(self.data)):
+                 if i<0:
+                     val = (0.5)
+                 elif i>=len(self.data):
+                     val = (0.5)
+                 else:
+                     val = (self.data[i][0]*multiplier+offset)
+                     
+                 if uLawEncode!=-1:
+                    self.flat_data.append(Encoder.uLawEncode(val, uLawEncode))
+                 else:
+                    self.flat_data.append(val)
+             return self.flat_data
+         else:
+             return self.flat_data
+         
+     def ExtractFromClone(self, clone_id, start_frame, end_frame, offset=127, multiplier=2048, uLawEncode = -1):
+         data = self.clones[clone_id]
+         extract = []
+         ratio = clone_id/self.samplerate
+         
+         length = end_frame-start_frame
+         
+         end_frame = int(end_frame*ratio)
+         start_frame = end_frame-length
+         
+         #print(" samplerate: "+str(clone_id)+" start: "+str(start_frame)+" end: "+str(end_frame)+" length: "+str(end_frame-start_frame))
+
+         i = start_frame
+         
+         while i<end_frame:
+             if i<0:
+                 val = (0.5)
+             elif i>=len(data):
+                 val = (0.5)
+             else:
+                 val = (data[i][0]*multiplier+offset)
+                 
+             if uLawEncode!=-1:
+                extract.append(Encoder.uLawEncode(val, uLawEncode))
+             else:
+                extract.append(val)
+             
+             i+=1
+        
+         #print("clone: "+str(extract))
+                
+         return extract
+         
+     def resample_as_clone(self, samplerate):
+         import scipy.signal as sps
+         
+         step = int(self.samplerate/samplerate)
+         
+         print("step: "+str(step)+" samplerate: "+str(samplerate))
+         
+         self.clones[samplerate] = None
+
+         container = []
+         for d in self.data:
+             container.append(d[0])
+
+         container = container[0:len(container):step]
+         
+         for d in range(len(container)):
+             container[d] = [container[d], container[d]]
+
+         self.clones[samplerate] = container
+         
      def resample(self, samplerate):
          import scipy.signal as sps
 
@@ -553,3 +865,35 @@ class Encoder:
                 _max = abs(data[i])
                 
         return abs(data[_max_index])
+        
+    def avg(data=[], steps=-1):
+        if steps <= 0:
+            _sum = 0
+            for v in data:
+                _sum+=v
+            return _sum/len(data)
+        else:
+            _sum = 0
+            stride = int(len(data)/steps)
+            
+            if stride<=0:
+                stride = 1
+                
+            counter = 0
+            divider = 0
+            for v in range(steps):
+                if counter<len(data):
+                    _sum+=data[counter]
+                    divider+=1
+                else:
+                    break
+
+                counter+=stride
+        
+            return _sum/divider
+            
+    def entropy(data=[], ground=0.5):
+        _sum = 0
+        for v in data:
+            _sum+=abs(v-ground)
+        return _sum/len(data)

@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from helpers.sound_tools import Encoder
 import random as rand
+import time
+from IPython.display import clear_output
 
 global layer_counter
 layer_counter={}
@@ -156,6 +158,7 @@ class GRUOperation:
         self.dropout = dropout
         self.name = name
         self.batch_size = batch_size
+        self.state = None
         
         global layer_counter
         
@@ -337,11 +340,12 @@ class ConvNet:
                  training_iters = 200000, 
                  batch_size = 128, 
                  display_step = 10, 
+                 graph_display_step = 100,
                  dropout=0.75, 
                  n_steps=-1, 
                  save_step = 10000,
                  decay_step = 100000,
-                 decay_rate = 0.95):
+                 decay_rate = 1):
         global layer_counter
         layer_counter = {}
         
@@ -354,6 +358,7 @@ class ConvNet:
         self.decay_step = decay_step
         self.decay_rate = decay_rate
         self.save_step = save_step
+        self.graph_display_step = graph_display_step
         
         # Network Parameters
         if n_steps<=0:
@@ -368,6 +373,8 @@ class ConvNet:
         self.acc_log = []
         self.loss_log = []
         self.n_steps = n_steps
+        
+        tf.reset_default_graph() 
     
     def getDefaultModel(self):
         layers = []
@@ -402,7 +409,14 @@ class ConvNet:
             
         return graph
         
-    def Run(self, layers=None, save_path="", restore_path="", input_as_label=False, x=None, y=None):
+    def Run(self, 
+            layers=None, 
+            save_path="", 
+            restore_path="", 
+            input_as_label=False, 
+            x=None, 
+            y=None,
+            state=None):
         
         # tf Graph input
         if x==None:
@@ -449,31 +463,39 @@ class ConvNet:
         
         # 'Saver' op to save and restore all the variables
         saver = tf.train.Saver()
-
+        start_t = time.process_time()
+        
         # Launch the graph
         with tf.Session() as sess:
             sess.run(self.init)
             
-            if len(restore_path)>0 and os.path.exists(restore_path+".meta"):
+            if len(restore_path)>0 and os.path.exists(restore_path+"/model.meta"):
                  # Restore model weights from previously saved model
-                saver = tf.train.import_meta_graph(restore_path+'.meta')
-                load_path=saver.restore(sess, tf.train.latest_checkpoint(restore_path))
-                print ("Model restored from file: %s" % restore_path)
+                #saver = tf.train.import_meta_graph(restore_path+'/model.meta')
+                load_path=saver.restore(sess, restore_path+"/model")
+                print ("Model restored from file: %s" % load_path)  
+                #TODO: restore acc_log and loss_log
             
             step = 1
             
             self.labels_log = []
+            duration = 0
+            gpu_duration = 0
             
             if self.training_iters>300:
                 # Keep training until reach max iterations
                 while step * self.batch_size < self.training_iters:
                     
                     batch = []
+                    _t = time.process_time()
                     
                     if(self.n_steps>0):
                         batch = self.loader.getNextTimeBatch(self.batch_size, n_steps=self.n_steps)
                     else:
                         batch = self.loader.getNextBatch(self.batch_size)
+                        
+                    duration += time.process_time()-_t
+                        
                     self.debug_batch = batch
                     inputs = batch[0]
                     labels = batch[1]    
@@ -494,25 +516,56 @@ class ConvNet:
 
                             inputs.append(tmp_x)
                             labels.append(tmp_y)
-                         
+                    
+                    _t = time.process_time()
+                    
                     # Run optimization op (backprop)
-                    sess.run(optimizer, feed_dict={x: inputs, y: labels, keep_prob: self.dropout})
-                    if step % self.display_step == 0:
-                        # Calculate batch loss and accuracy
-                        loss, acc = sess.run([cost, accuracy], feed_dict={x: inputs,
-                                                                          y: labels,
-                                                                          keep_prob: 1.})
-                        print ("Iter " + str(step*self.batch_size) + ", Minibatch Loss= " \
-                        "{:.6f}".format(loss) + ", Training Accuracy= " \
-                        "{:.5f}".format(acc) + ", Learning Rate= " + str(learning_rate.eval()))
-                        self.acc_log.append(acc)
-                        self.loss_log.append(loss)
+                    if state!=None:
+                        state, optim = sess.run([state, optimizer], feed_dict={x: inputs, y: labels, keep_prob: self.dropout, initial_state:state})
+                    else:
+                        sess.run(optimizer, feed_dict={x: inputs, y: labels, keep_prob: self.dropout})
+                    
+                    gpu_duration += time.process_time()-_t
+                    
                     if step % self.save_step == 0:
                          if len(save_path)>0:
                             # Save model weights to disk
                             s_path = saver.save(sess, save_path+"/model")
                             print ("Model saved in file: %s" % s_path)
-                            
+                    
+                    if step % self.display_step == 0:
+                        duration = int((duration/self.display_step)*100)/100
+                        gpu_duration = int((gpu_duration/self.display_step)*100)/100
+                        mins_passed = int((time.process_time()-start_t)/60)
+                        # Calculate batch loss and accuracy
+                        loss, acc = sess.run([cost, accuracy], feed_dict={x: inputs,
+                                                                          y: labels,
+                                                                          keep_prob: 1.})
+                        print ("Iter " + str(step*self.batch_size) + ", Loss= " \
+                        "{:.6f}".format(loss) + ", Accuracy= " \
+                        "{:.5f}".format(acc) + ", Lrn Rate= " + str(learning_rate.eval())\
+                        +" cpu: " + str(duration) + "s, gpu: " + str(gpu_duration)+"s"\
+                        +" time: "+str(mins_passed)+"mins"+" pool: "+str(len(self.loader.pool))
+                        )
+                        self.acc_log.append(acc)
+                        self.loss_log.append(loss)
+                        duration = 0
+                        gpu_duration = 0
+                        
+                    if step % self.graph_display_step == 0:
+                        clear_output()
+                        plt.plot(self.acc_log)
+                        plt.ylabel("Accuracy")
+                        plt.show()
+                        plt.plot(self.loss_log, color="red")
+                        plt.ylabel("Loss")
+                        plt.show()
+                        plt.plot(self.labels_log, color="green")
+                        plt.ylabel("Labels repartition")
+                        plt.show()
+                        
+                        
+                    
                     step += 1
                     
             batch = []
@@ -575,13 +628,17 @@ class ConvNet:
                  use_sample_state=False, 
                  sample_state_offset=0, 
                  display_step=100, 
-                 sample_length=15, 
-                 epsilon = 0.01,
-                 label_offset=0):
+                 epsilon = 0,
+                 label_offset=0,
+                 sample_state_speed=1,
+                 start_samples = None,
+                 state = None,
+                 input_buffer = []
+                 ):
         
-        generation_result = []
+        self.generation_result = []
         for v in input_v:
-            generation_result+=v
+            self.generation_result+=v
 		
         # tf Graph input
         if x==None:
@@ -616,12 +673,26 @@ class ConvNet:
                     last_val.append(0.5)
                 
                 for i in range(iterations):
-                    result = sess.run(pred, feed_dict={x: [input_v]}) 
+                    final_input = input_v
+                    if len(self.loader.sample_shape)!=0:
+                        final_input = start_samples + input_v
+                        start_samples = self.extract_summary(input_buffer+self.generation_result, len(self.generation_result)-1)
+                    elif self.loader.entropy!=None:
+                        final_input = start_samples + input_v
+                        start_samples = self.extract_entropy_summary(input_buffer+self.generation_result, len(self.generation_result)-1)
+                    
+                    result = None
+                    
+                    if state == None:
+                        result = sess.run(pred, feed_dict={x: [final_input]}) 
+                    else:
+                        result, state = sess.run(pred, feed_dict={x: [final_input], initial_state: state})
                     r_sample_state = sample_state
                     
                     if self.loader.one_hot!=-1:
                         next_val = self.max_index(result[0])/self.loader.one_hot
-                        generation_result.append(next_val)
+                        
+                        self.generation_result.append(next_val)
                         
                         if self.loader.uLawEncode!=-1:
                             next_val = Encoder.uLawEncode(next_val, self.loader.uLawEncode)
@@ -666,20 +737,166 @@ class ConvNet:
                             input_v = input_v + list(result[0])
                             input_v = input_v[self.n_classes:]
 
-                        generation_result = generation_result + list(result[0])
-
+                        self.generation_result = self.generation_result + list(result[0])
+                        
                     if i%display_step==0:
+                        clear_output()
                         print("sample_state: "+str(r_sample_state))
                         if self.n_steps>0:
-                            print("status: "+str(i)+"/"+str(iterations)+" "+str(input_v[len(input_v)-1][0:10])+" "+str(len(generation_result)))
+                            print("status: "+str(i)+"/"+str(iterations)+" "+str(input_v[len(input_v)-1][0:10])+" "+str(len(self.generation_result)))
                         else:
-                            print("status: "+str(i)+"/"+str(iterations)+" "+str(input_v[0:10])+" "+str(len(generation_result)))
+                            print("status: "+str(i)+"/"+str(iterations)+" "+str(input_v[0:10])+" "+str(len(self.generation_result)))
                         
-                    sample_state+=1/len(self.loader.converter.data)
+                        plt.plot(self.generation_result)
+                        plt.ylabel("Result")
+                        plt.show()
+                    sample_state+=(1/len(self.loader.converter.data))*sample_state_speed
             else:
                 print ("Not found: " + restore_path)
         sess.close()
-        return generation_result
+        return self.generation_result
+        
+    def initClones(self):
+         self.clones = {}
+         self.clone_buffers = {}
+ 
+         for clone_id in self.loader.sample_shape[0]:
+             self.clones[clone_id] = []
+             self.clone_buffers[clone_id] = []
+         
+    def pushInClones(self, value):
+        for clone_id in self.loader.sample_shape[0]:
+            if len(self.clone_buffers[clone_id])>=clone_id/self.loader.samplerate:
+                self.clones[clone_id].append(np.average(self.clone_buffers[clone_id]))
+                self.clone_buffers[clone_id] = [value]
+            else:
+                self.clone_buffers[clone_id].append(value)
+
+    def extractFromClones(self):
+        samples = []
+
+        start = None
+
+        for clone_id in self.loader.sample_shape[0]:
+            if start==None:
+                start = len(self.clones[clone_id])-1
+            
+            sample = self.extractFromClone(clone_id, start-len(self.loader.sample_shape), start, uLawEncode = self.loader.uLawEncode)
+            
+            if self.n_steps!=-1:
+                sample = self.loader.converter.reshapeAsSequence(sample, self.n_steps)
+            
+            samples = samples + sample
+        return samples
+            
+    def extractFromClone(self, clone_id, start_frame, end_frame, uLawEncode = -1):
+         data = self.clones[clone_id]
+         
+         extract = []
+         i = start_frame
+         
+         while i<end_frame:
+             val = 0
+             if i<0:
+                 val = (0.5)
+             elif i>=len(data):
+                 val = (0.5)
+             else:
+                 val = (data[i])
+                 
+             if uLawEncode!=-1:
+                extract.append(Encoder.uLawEncode(val, uLawEncode))
+             else:
+                extract.append(val)
+                
+             i+=1
+                
+         return extract
+         
+    def extract_entropy_summary(self, data, last_start_index):
+        converter  = self.loader.converter
+        
+        size = self.loader.entropy["size"]
+        step = self.loader.entropy["step"]
+        increase_rate = self.loader.entropy["increase_rate"]
+        max_step = self.loader.entropy["max_step"]
+        
+        offset = 0
+        sample = []
+        
+        for k in range(size):
+            small_sample = self._extract_from_generated(data, last_start_index-offset-step, last_start_index-offset, uLawEncode = self.loader.uLawEncode)
+            
+            val = 0
+            if self.loader.sample_avg>0:
+                val = Encoder.avg(small_sample, self.loader.sample_avg)
+            else:
+                if self.loader.uLawEncode!=-1:
+                    val = Encoder.entropy(small_sample)
+                else:
+                    val = Encoder.uLawEncode(Encoder.entropy(small_sample), self.loader.uLawEncode)
+            
+            sample.insert(0, val)     
+            
+            offset += step 
+            if step<max_step:
+                step+=increase_rate
+                
+        #sample = np.flip(sample, 0).tolist()
+        sample = converter.reshapeAsSequence(sample, self.n_steps)
+        self.debug_offset = offset
+        self.debug_max_step = step
+        return sample      
+         
+    def extract_summary(self, data, last_start_index):
+        converter  = self.loader.converter
+        offset = 0
+        samples = []
+        sample_length = len(self.loader.sample_shape)
+        for sample_range in self.loader.sample_shape[0]:
+            
+            sample = []
+            for frame_id in range(sample_length):
+                if self.loader.use_avg:
+                    small_sample = self._extract_from_generated(data, last_start_index-offset-sample_range, last_start_index-offset, uLawEncode = self.loader.uLawEncode)
+                    #process small_sample
+                    val = np.average(small_sample)
+                    sample.append(val)
+                else:
+                    small_sample = self._extract_from_generated(data, last_start_index-offset-1, last_start_index-offset, uLawEncode = self.loader.uLawEncode)
+                    #process small_sample
+                    val = small_sample[0]
+                    sample.append(val)
+                
+                offset += sample_range
+                
+            if self.n_steps!=-1:
+                sample = converter.reshapeAsSequence(sample, self.n_steps)
+            
+            samples = sample + samples
+        return samples
+        
+    def _extract_from_generated(self, data, start_frame, end_frame, uLawEncode = -1, multiplier = 1):
+         extract = []
+         i = start_frame
+         
+         while i<end_frame:
+             val = 0
+             if i<0:
+                 val = (0.5)
+             elif i>=len(data):
+                 val = (0.5)
+             else:
+                 val = data[i]*multiplier+(1-multiplier)
+                 
+             if uLawEncode!=-1:
+                extract.append(Encoder.uLawEncode(val, uLawEncode))
+             else:
+                extract.append(val)
+                
+             i+=1
+                
+         return extract
         
     def TrainAndGenerate(self, 
                          layers=None, 
@@ -693,7 +910,9 @@ class ConvNet:
                          sample_state_offset=0, 
                          display_step=100, 
                          sample_length=15, 
-                         epsilon = 0.01):
+                         epsilon = 0.01, 
+                         sample_state_speed=1,
+                         ):
         
          # tf Graph input
         if x==None:
@@ -863,7 +1082,7 @@ class ConvNet:
                     else:
                         print("status: "+str(i)+"/"+str(iterations)+" "+str(input_v[0:10])+" "+str(len(generation_result)))
                     
-                sample_state+=1/len(self.loader.converter.data)
+                sample_state+=(1/len(self.loader.converter.data))*sample_state_speed
                 
         sess.close()
         return generation_result
