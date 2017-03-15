@@ -28,18 +28,6 @@ network = ConvNet(loader)
 network.Run()
 ```
 
-- Deezer classifier (Notebook: https://github.com/MrNothing/TensorflowHelpers/blob/master/Music%20Classification.ipynb)
-```python
-from helpers.extractor import *
-from helpers.deezer_tools import *
-from helpers.neural_network import *
-
-loader = DeezerLoader(sample_size=1/256)
-network = ConvNet(loader)
-
-network.Run()
-```
-
 - Customize graph:
 ```python
 from helpers.extractor import *
@@ -69,7 +57,7 @@ from helpers.extractor import *
 from helpers.neural_network import *
 
 loader = CifarLoader("data/cifar10", "Grayscale")
-network = ConvNet(loader, save_path="graphs/model.ckpt", restore_path="graphs/model.ckpt")
+network = ConvNet(loader, save_path="graphs/Cifar10Graph", restore_path="graphs/Cifar10Graph")
 
 network.Run(layers)
 ```
