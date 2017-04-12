@@ -26,8 +26,35 @@ import _thread as thread
 import time
 import pickle
 from os import listdir
+import matplotlib.pyplot as plt
 
 deezer_api_url = "http://api.deezer.com/"
+
+def BuildEntropyCache(loader, cache_file):
+    
+    if os.path.exists(cache_file):
+        print("cache file already exists: "+cache_file)
+    else:
+        was_random = loader.random
+        loader.random = False
+        last_len = 0
+        iso = -1
+        while iso<10:
+            if loader.n_steps==-1:
+                loader.getNextBatch(128)
+            else:
+                loader.getNextTimeBatch(128, n_steps=loader.n_steps)
+            print("building cache: "+str(int(len(loader.cache)/(len(loader.converter.data))*10000)/100)+"%")
+            
+            if last_len!=len(loader.cache):
+                iso = 0
+            else:
+                iso+=1
+                
+            last_len = len(loader.cache)
+            
+        loader.save_cache(cache_file)
+        loader.random = was_random
 
 class SoundCombiner:
     def __init__(self, loaders):
@@ -75,6 +102,10 @@ class SoundLoader:
                  fixed_size=-1, 
                  sample_size=1/15, 
                  insert_global_input_state = -1,
+                 label_is_derivative = False, #1st derivatives
+                 insert_input_derivative = False,
+                 insert_input_amplitude = False,
+                 input_is_amplitude = False,
                  one_hot = -1,
                  uLaw = -1,
                  log = False,
@@ -84,11 +115,12 @@ class SoundLoader:
                  amplitude = 1,
                  label_offset = 0,
                  sample_shape = [], #[[2, 20, 200]]*64
-                 n_steps = 16,
+                 n_steps = -1,
                  batch_size = 128,
                  n_threads = 0,
                  max_pool = 200,
-                 entropy = None #{"step":1, "increase_rate":0, "max_step":50, "size":64},
+                 entropy = None, #{"step":1, "increase_rate":0, "increase_step":1, "max_step":50, "size":64, "differential":False, "chaos_rate":0.01},
+                 cache_size = -1,
                  ):
         self.sound = sound
         self.log = log
@@ -97,15 +129,41 @@ class SoundLoader:
         self.sample_shape = sample_shape
         self.entropy = entropy
         
+        self.label_is_derivative = label_is_derivative
+        self.insert_input_derivative = insert_input_derivative
+        self.insert_input_amplitude = insert_input_amplitude
+        self.input_is_amplitude = input_is_amplitude
+        self.segment = False
+        
+        self.cache = {}
+        
+        self.converter = SoundConverter(sound)
+        
+        if cache_size!=False:
+            self.cache_size = len(self.converter.data)+1
+            estimation = 0
+            if self.entropy!=None:
+                estimation = ((self.cache_size*3)/4410)*(self.entropy["size"]/128)
+            
+            print("Cache estimated to: "+str(int(estimation))+"mb")
+        else:
+            self.cache_size = -1
+        
         if self.entropy!=None:
             step = self.entropy["step"]
             state = 0
+            increase_step = 0
+            if self.entropy.__contains__("increase_step"):
+                increase_step = self.entropy["increase_step"]
+
             for k in range(self.entropy["size"]):
                 state+=step
-                if step<self.entropy["max_step"]:
+                if step<self.entropy["max_step"] and k%increase_step==0:
                     step+=self.entropy["increase_rate"]
             print ("Entropy range: "+str(state)+" frames.")
+            self.converter.entropy_range = state
         
+            
         if(LABELS_COUNT!=-1):
             self.LABELS_COUNT = LABELS_COUNT
         else:
@@ -114,8 +172,30 @@ class SoundLoader:
         self.sample_size = sample_size
         self.fixed_size = fixed_size
         
-        self.converter = SoundConverter(sound)
-        self.converter.resample(samplerate)
+        if self.label_is_derivative:
+            print("resampling...")
+            freq_map = []
+            for i in range(len(self.converter.data)):
+                if i%self.converter.samplerate==0:
+                    print(str(i)+"/"+str(len(self.converter.data)))
+                small_sample = self.converter.Extract(i-40, i+40, multiplier=1, offset=0, uLawEncode = -1)
+                freq_map.append(Encoder.get_frequency(small_sample, 0, 0.1))
+            print("done!")
+        
+        
+        if input_is_amplitude:
+            self.converter.resampleAsAmplitude(samplerate)
+            
+            raw_data = []
+            for i in range(len(self.converter.data)):
+                raw_data.append(((self.converter.data[i][0]+self.converter.data[i][1])/2))
+            
+            plt.plot(raw_data, color="red")
+            plt.ylabel("Resampled data")
+            plt.show()
+        else:
+            self.converter.resample(samplerate)
+            
         
         #if len(sample_shape)>0:
         #    for sample_r in sample_shape[0]:
@@ -143,6 +223,7 @@ class SoundLoader:
             self.fixed_size += self.extract_length
         
         test_audio = self.converter.ExtractRandomSample(sample_size=sample_size, multiplier=multiplier)
+        self.converter.cache = {}
         self.sound_length = len(self.converter.data)
         
         self.multiplier = multiplier
@@ -182,6 +263,20 @@ class SoundLoader:
             print ("Thread started, id: "+str(k))
             
     
+    def save_cache(self, cache_file):
+        with open(cache_file, 'wb') as f:
+            pickle.dump(self.cache, f, pickle.HIGHEST_PROTOCOL)
+            print("Cache file saved: "+cache_file)
+            
+    def load_cache(self, cache_file):        
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+                self.cache = data
+                print("Cache file loaded: "+cache_file)
+        else:
+            print("Cache file was not found: "+cache_file)
+                    
     def getExtract(self, startRatio, length):
         return self.converter.SoundToImage(compress=False, offset=self.multiplier/2, multiplier=self.multiplier*self.amplitude, ratio=1, sample_range=[startRatio, 1], uLawEncode = self.uLawEncode, log=False, as_tensors=True)
         
@@ -248,97 +343,142 @@ class SoundLoader:
             
             if self.random:
                 image = converter.ExtractRandomSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+            elif self.segment:
+                image = converter.ExtractSegmentedSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
             else:
                 image = converter.ExtractNextSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
             
             last_start_index = converter.last_start_index
                 
             label = image[len(image)-self.extract_length:len(image)]
-            
             if self.one_hot!=-1:
                 label = Encoder.OneHot(label, self.one_hot)
-                
             labels.append(label)
             
-            #print("init: "+str(converter.last_start_index)+" len: "+str(len(image[0:len(image)-self.extract_length-self.label_offset])))
-            
-            image = converter.reshapeAsSequence(image[0:len(image)-self.extract_length-self.label_offset], n_steps)
-            offset = 0
-            if len(self.sample_shape)!=0:
-                samples = []
-                sample_length = len(self.sample_shape)
-                for sample_range in self.sample_shape[0]:
-                    
-                    sample = []
-                    for frame_id in range(sample_length):
-                        if self.use_avg:
-                            val = 0
-                            small_sample = converter.Extract(last_start_index-offset-sample_range, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
-                            #process small_sample
-                            if self.sample_avg>0:
-                                val = Encoder.avg(small_sample, self.sample_avg)
-                            else:
-                                if self.uLawEncode!=-1:
-                                    val = np.average(small_sample)
-                                else:
-                                    val = Encoder.uLawEncode(np.average(small_sample), self.uLawEncode)
-                            sample.append(val)
-                        else:
-                            small_sample = converter.Extract(last_start_index-offset-1, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
-                            #process small_sample
-                            val = small_sample[0]
-                            sample.append(val)
+            if self.cache_size!=-1 and self.cache.__contains__(last_start_index):
+                images.append(self.cache[last_start_index])
+            else:
+                #print("init: "+str(converter.last_start_index)+" len: "+str(len(image[0:len(image)-self.extract_length-self.label_offset])))
+                
+                freq = 0
+                if self.insert_input_derivative:
+                    small_sample = converter.Extract(last_start_index, last_start_index+12, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
+                    freq = Encoder.get_frequency(small_sample, 0, 0.1)-0.2
+                    if(freq>1):
+                        print("warning: freq was>1 "+str(freq))
+                        freq = 1
+                
+                amp = 0
+                if self.insert_input_amplitude:
+                    amp_array = []
                         
-                        offset += sample_range
-                    
-                    sample = converter.reshapeAsSequence(sample, n_steps)
-                    
-                    samples = sample + samples
-                    
-                image = samples + image
-            elif self.entropy != None:
-                size = self.entropy["size"]
-                step = self.entropy["step"]
-                increase_rate = self.entropy["increase_rate"]
-                max_step = self.entropy["max_step"]
+                    small_sample = converter.Extract(last_start_index, last_start_index+12, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
+                    for u in small_sample:
+                        amp_array.append(abs(u))
+                    amp = np.average(amp_array)*2.5
+                    if(amp>1):
+                        print("warning: amp was>1 "+str(amp))
+                        amp = 1
+
+                image = converter.reshapeAsSequence(image[0:len(image)-self.extract_length-self.label_offset], n_steps)
                 
                 offset = 0
-                sample = []
-
-                for k in range(size):
-                    small_sample = converter.Extract(last_start_index-offset-step, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
-                    
-                    val = 0
-                    if self.sample_avg>0:
-                        val = Encoder.avg(small_sample, self.sample_avg)
-                    else:
-                        if self.uLawEncode!=-1:
-                            val = Encoder.entropy(small_sample)
-                        else:
-                            val = Encoder.uLawEncode(Encoder.entropy(small_sample), self.uLawEncode)
-                    
-                    sample.insert(0, val) 
-                    
-                    offset += step 
-                    if step<max_step:
-                        step+=increase_rate
+                if len(self.sample_shape)!=0:
+                    samples = []
+                    sample_length = len(self.sample_shape)
+                    for sample_range in self.sample_shape[0]:
                         
-                #sample = np.flip(sample, 0).tolist()
-                sample = converter.reshapeAsSequence(sample, n_steps)
-                self.debug_offset = offset
-                self.debug_max_step = step
-                image = sample + image
-            else:
-                if self.insert_global_input_state!=-1:
-                    if self.uLawEncode!=-1:
-                        image = [[Encoder.uLawEncode(converter.last_sample_position, self.uLawEncode)]*len(image[0])]*self.insert_global_input_state+image
-                    else:
-                        image = [[converter.last_sample_position]*len(image[0])]*self.insert_global_input_state+image
-            if lock==None:
-                self.extract_log.append(converter.last_sample_position)
-                     
+                        sample = []
+                        for frame_id in range(sample_length):
+                            if self.use_avg:
+                                val = 0
+                                small_sample = converter.Extract(last_start_index-offset-sample_range, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                                #process small_sample
+                                if self.sample_avg>0:
+                                    val = Encoder.avg(small_sample, self.sample_avg)
+                                else:
+                                    if self.uLawEncode!=-1:
+                                        val = np.average(small_sample)
+                                    else:
+                                        val = Encoder.uLawEncode(np.average(small_sample), self.uLawEncode)
+                                sample.append(val)
+                            else:
+                                small_sample = converter.Extract(last_start_index-offset-1, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                                #process small_sample
+                                val = small_sample[0]
+                                sample.append(val)
+                            
+                            offset += sample_range
+                        
+                        sample = converter.reshapeAsSequence(sample, n_steps)
+                        
+                        samples = sample + samples
+                        
+                    image = samples + image
+                elif self.entropy != None:
+                    size = self.entropy["size"]
+                    step = self.entropy["step"]
+                    increase_rate = self.entropy["increase_rate"]
+                    max_step = self.entropy["max_step"]
+                    differential = self.entropy["differential"]
+
+                    increase_step = 0
+                    if self.entropy.__contains__("increase_step"):
+                        increase_step = self.entropy["increase_step"]
+                    
+                    offset = 0
+                    sample = []
+    
+                    for k in range(size):
+                        small_sample = []
+                        if differential:
+                            small_sample = np.diff(small_sample)
+                            small_sample = converter.Extract(last_start_index-offset-step, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                        else:
+                            small_sample = converter.Extract(last_start_index-offset-step, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                        
+                        val = 0
+                        if self.sample_avg>0:
+                            val = Encoder.avg(small_sample, self.sample_avg)
+                        else:
+                            #if self.uLawEncode!=-1:
+                            val = Encoder.entropy(small_sample)
+                            #else:
+                                #val = Encoder.uLawEncode(Encoder.entropy(small_sample), self.uLawEncode)
+                        
+                        sample.insert(0, val) 
+                        
+                        offset += step 
+                        if step<max_step and k%increase_step==0:
+                            step+=increase_rate
+                            
+                    #sample = np.flip(sample, 0).tolist()
+                    sample = converter.reshapeAsSequence(sample, n_steps)
+                    self.debug_offset = offset
+                    self.debug_max_step = step
+                    image = sample + image
+                else:
+                    if self.insert_global_input_state!=-1:
+                        if self.uLawEncode!=-1:
+                            image = [[Encoder.uLawEncode(converter.last_sample_position, self.uLawEncode)]*len(image[0])]*self.insert_global_input_state+image
+                        else:
+                            image = [[converter.last_sample_position]*len(image[0])]*self.insert_global_input_state+image
                 
-            images.append(image)
+                size = 5
+                
+                if self.insert_input_amplitude:
+                    image = [[amp]]*size + image
+                
+                if self.insert_input_derivative:
+                    image = [[freq]]*size + image
+                
+                if lock==None:
+                    self.extract_log.append(converter.last_sample_position)
+                
+                if len(self.cache)<self.cache_size:
+                    self.cache[last_start_index] = image
+                
+                images.append(image)
         
         if lock!=None:
             lock.acquire()
@@ -367,52 +507,158 @@ class SoundLoader:
 
     def getNextBatch(self, 
                          batch_size, 
-                         shuffle_rate=-1):
+                         shuffle_rate=-1, 
+                         n_reccurent_input = 0,
+                         ):
         images = []
         labels = []
-
+        
         converter = self.converter
         
+        past_images = []
+
         while len(images)<batch_size:
             image = None
+            past_img = None
             if self.random:
-                image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                if self.input_is_amplitude==False:
+                    image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                else:
+                    image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
+            elif self.segment:
+                image = converter.ExtractSegmentedSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
             else:
-                image = converter.ExtractNextSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                if self.input_is_amplitude==False:
+                    image = converter.ExtractNextSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                else:
+                    image = converter.ExtractNextSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
                 
+            last_start_index = converter.last_start_index
+            
+            #LABEL DETECTION
             label = image[len(image)-self.extract_length+self.label_offset:len(image)+self.label_offset]
             
+            if self.label_is_derivative:
+                freq = Encoder.get_frequency(image, 0.5, 0.1)
+                if(freq>1):
+                    print("warning: freq was>1: "+str(freq))
+                    freq = 1
+                
+                label = [freq]    
+    
             if self.one_hot!=-1:
                 label = Encoder.OneHot(label, self.one_hot)
-
+    
             labels.append(label)
-            
-            image = image[0:self.fixed_size-self.extract_length]
-            
-            self.extract_log.append(converter.last_sample_position)
-            
-            if len(self.sample_shape)!=0:
-                samples = []
-                for clone_id in self.sample_shape[0]:
-                    sample = converter.ExtractFromClone(clone_id, converter.last_start_index-len(self.sample_shape), converter.last_start_index, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
-                    
-                    samples = samples + sample
-                    
-                image = samples + image
-            
-            if self.insert_global_input_state:
-                if self.uLawEncode!=-1:
-                    image[0] = Encoder.uLawEncode(converter.last_sample_position, self.uLawEncode)
-                else:
-                    image[0] = converter.last_sample_position
-                    
+            #END LABEL DETECTION
                 
-            images.append(image)
+            if self.cache_size!=-1 and self.cache.__contains__(last_start_index):
+                images.append(self.cache[last_start_index][0])
+                past_images.append(self.cache[last_start_index][1])
+            else:
+                deriv = 0
+                if self.insert_input_derivative:
+                    deriv = self.converter.extract_derivative(image)*0.03
+
+                amp = 0
+                if self.insert_input_amplitude:
+                    amp_array = []
+                        
+                    small_sample = converter.Extract(last_start_index, last_start_index+32, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
+                    for u in small_sample:
+                        amp_array.append(abs(u))
+                    amp = np.floor(np.average(amp_array)*200)/100
+                    if(amp>1):
+                        amp = 1
+                        print("warning: amp was>1")
+                
+                image = image[0:self.fixed_size-self.extract_length]
+                
+                self.extract_log.append(converter.last_sample_position)
+                
+                if len(self.sample_shape)!=0:
+                    samples = []
+                    for clone_id in self.sample_shape[0]:
+                        sample = converter.ExtractFromClone(clone_id, converter.last_start_index-len(self.sample_shape), converter.last_start_index, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                        
+                        samples = samples + sample
+                        
+                    image = samples + image
+                elif n_reccurent_input !=0:
+                    past_img = converter.Extract(last_start_index-n_reccurent_input, last_start_index, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                    past_images.append(past_img)
+                    
+                elif self.entropy != None:
+                    size = self.entropy["size"]
+                    step = self.entropy["step"]
+                    increase_rate = self.entropy["increase_rate"]
+                    
+                    increase_step = 0
+                    if self.entropy.__contains__("increase_step"):
+                        increase_step = self.entropy["increase_step"]
+
+                    max_step = self.entropy["max_step"]
+                    differential = self.entropy["differential"]
+                    
+                    offset = 0
+                    sample = []
+    
+                    for k in range(size):
+                        small_sample = []
+                        if self.input_is_amplitude:
+                            small_sample = converter.Extract(last_start_index-offset-step, last_start_index-offset, multiplier=self.multiplier*self.amplitude*0.1, offset=0, uLawEncode = self.uLawEncode)
+                        else:
+                            small_sample = converter.Extract(last_start_index-offset-step, last_start_index-offset, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                        
+                        if differential:
+                            small_sample = np.diff(small_sample)
+                        
+                        val = 0
+                        if self.sample_avg>0:
+                            val = Encoder.avg(small_sample, self.sample_avg)
+                        else:
+                            #if self.uLawEncode!=-1:
+                            val = Encoder.entropy(small_sample)
+                            #else:
+                            #    val = Encoder.uLawEncode(Encoder.entropy(small_sample), self.uLawEncode)
+                        
+                        sample.insert(0, val) 
+                        
+                        offset += step 
+                        if step<max_step and k%increase_step==0:
+                            step+=increase_rate
+                            
+                    #sample = np.flip(sample, 0).tolist()
+                    #sample = converter.reshapeAsSequence(sample, n_steps)
+                    self.debug_offset = offset
+                    self.debug_max_step = step
+                    image = sample + image
+                
+                size = len(image)
+
+                if self.insert_global_input_state!=-1:
+                    image = [np.sin(last_start_index)*0.49+0.5]*size + image
+
+                if self.insert_input_amplitude:
+                    image = [amp]*size*2
+
+                if self.insert_input_derivative:
+                    image = [deriv]*size + image
+        
+                if len(self.cache)<self.cache_size:
+                    self.cache[last_start_index] = [image, past_img]
+
+                if self.entropy!=None and self.entropy.__contains__("chaos_rate"):
+                    chaos_rate = self.entropy["chaos_rate"]
+                    for u in range(len(image)):
+                        image[u]+=(rand.uniform(-1, 1)*chaos_rate*(len(image)-u))/len(image)
+                        image[u] = min(1, max(0, image[u]))
+                images.append(image)
         
         if self.log:
             print("extracted "+str(len(images))+" samples from "+self.sound)
         
-        return [images, labels]    
+        return [images, labels, past_images]    
 
     def getImageBytes(self):
         if self.fixed_size>0:
@@ -421,6 +667,9 @@ class SoundLoader:
             return self.image_width*self.image_width
     def getImageWidth(self):
         return self.image_width 
+        
+    def getMap(self):
+        return self.converter.getRawAudio()
         
 class SoundImage:
     def __init__(self, width, height, sample_rate, r=None, g=None, b=None, a=None):
@@ -549,12 +798,15 @@ class SoundConverter:
          self.state = 0
          self.clones = {}
          self.flat_data = None
-         
+         self.entropy_range = 0
+         self.cache = {}
+         self.derivated_data = []
+
          if len(path)>0:
              data, samplerate = sf.read(self.path)
              self.data = data
              self.samplerate = samplerate
-         
+             
      def ExtractSamples(self, samples_count=10, offset=127, multiplier=2048, ratio=1, as_tensors=False):
          result = []
          for i_counter in range(samples_count):
@@ -572,7 +824,7 @@ class SoundConverter:
          else:
              self.state+=sample_size
              
-         if self.state>=1:
+         if self.state>=1:#+self.entropy_range/len(self.data)
              self.state=0
              
          self.last_sample_position = self.state
@@ -585,16 +837,30 @@ class SoundConverter:
 
      def ExtractRandomSample(self, limiter=99999999999, fixed_size=-1, sample_size=1/15, offset=127, multiplier=2048, ratio=1, as_tensors=True, uLawEncode=-1):
          sample_len = sample_size
-         rand_start = rand.uniform(0.0, 1.0-sample_len)
+         rand_start = rand.uniform(0, 1)
          
          self.last_sample_position = rand_start
          
          sample_range = [rand_start, rand_start+sample_len]
-
-         #print(str(sample_range[1]-sample_range[0])+"=="+str(sample_len))
-
+        
+         index = int(len(self.data)*rand_start)
+         self.last_start_index = index
+         
          return (self.SoundToImage(fixed_size=fixed_size, compress=False, offset=offset, multiplier=multiplier, ratio=ratio, sample_range=sample_range, log=False, as_tensors=as_tensors, limiter=limiter, uLawEncode=uLawEncode))
-
+     
+     def ExtractSegmentedSample(self, limiter=99999999999, fixed_size=-1, sample_size=1/15, offset=127, multiplier=2048, ratio=1, as_tensors=True, uLawEncode=-1):
+         start_frame = rand.randint(0, int(len(self.data)/fixed_size))*fixed_size
+         end_frame = start_frame+fixed_size
+         self.last_start_index = start_frame
+         return self.Extract(start_frame, end_frame, offset, multiplier, uLawEncode)
+         
+     def extract_derivative(self, data, multiplier=1000):
+         data = np.diff(data)
+         for i in range(len(data)):
+             data[i] = abs(data[i])
+            
+         return np.average(data)*100
+     
      def GetEncodedBackground(self, start=0, length=256*256, offset=127, multiplier=2048, ratio=1):
          data = self.data
          samplerate = self.samplerate
@@ -624,6 +890,38 @@ class SoundConverter:
      def getAvgFrame(_range, index):
          todo=0
          
+     def getFrequencyMap(self, loader):
+         fmap = []
+         for i in range(len(self.data)):
+            small_sample = self.Extract(i, i+12, multiplier=loader.multiplier*loader.amplitude, offset=0, uLawEncode = loader.uLawEncode)
+            freq = Encoder.get_frequency(small_sample, 0, 0.1)-0.2
+            if(freq>1):
+                print("warning: freq was>1 "+str(freq))
+                freq = 1
+            fmap.append(freq)
+         return fmap
+         
+     def getAmplitudeMap(self, loader):
+         fmap = []
+         for i in range(len(self.data)):
+            small_sample = self.Extract(i, i+12, multiplier=loader.multiplier*loader.amplitude, offset=0, uLawEncode = loader.uLawEncode)
+            amp_array = []
+            for u in small_sample:
+                amp_array.append(abs(u))
+            amp = np.average(amp_array)*2.5
+            if(amp>1):
+                print("warning: amp was>1 "+str(amp))
+                amp = 1
+            fmap.append(amp)
+         return fmap
+             
+     def getRawAudio(self):
+         output = []
+         for i in self.data:
+             output.append(i[0]+0.5)
+             
+         return output
+         
      def SoundToImage(self, fixed_size=-1, limiter=99999999999, compress=False, offset=127, multiplier=2048, ratio=1, sample_range=[0,1], log=True, as_tensors=False, uLawEncode=-1):
 
          data = self.data
@@ -632,62 +930,70 @@ class SoundConverter:
          sample_begin = int(len(data)*sample_range[0])
          self.last_start_index = sample_begin
          
-         sample_end = int(len(data)*sample_range[1])
-         if fixed_size>0:
-             sample_end = sample_begin+fixed_size
-
-         diff = sample_end-sample_begin
-        
-         i = None
-         
-         if as_tensors:
-             i = []
+         if self.cache.__contains__(sample_begin):
+             return self.cache[sample_begin]
          else:
-             i = SoundImage(int(np.sqrt(diff)*0.7*(ratio)), int(np.sqrt(diff)*0.7*(1/ratio)), samplerate)
-             i.compressed = compress
-
-         if compress==False:
-             diff=0
-         if log:
-             print("image initialized, begin: "+str(sample_begin)+" end: "+str(sample_end))
-
-         counter = 0
-         pixel = 0
-         index = sample_begin
-         while index<sample_end-diff/2:
-            if counter>len(data)/20:
-                if log:
-                    print("status: "+str(index)+"/"+str(data[index]))
-                counter=0
-            counter+=1
+             sample_end = int(len(data)*sample_range[1])
+             if fixed_size>0:
+                 sample_end = sample_begin+fixed_size
+    
+             diff = sample_end-sample_begin
             
-            if as_tensors:
-                if pixel<limiter:
-                    
-                    if index>=len(data):
-                        val = ((data[0][0]+data[0][1])/2)*multiplier+offset
-                    else:
-                        val = ((data[index][0]+data[index][1])/2)*multiplier+offset
-                    
-                    if uLawEncode!=-1:
-                        i.append(Encoder.uLawEncode(val, uLawEncode))
-                    else:
-                        i.append(val)
-            else:
-                if pixel<i.getSize():
-                    if compress:
-                        i.setPixelAtIndex(pixel, data[index][0]*multiplier+offset, data[index][1]*multiplier+offset, data[sample_end-index-1][0]*multiplier+offset, data[sample_end-index-1][1]*multiplier+offset)
-                    else:
-                        i.setPixelAtIndex(pixel, data[index][0]*multiplier+offset, data[index][1]*multiplier+offset, 0, 255)
-
-            #f.write(data*2)
-
-            index+=1
-            pixel+=1
-
-         if log:
-             print("image generated: "+str(i.width)+"x"+str(i.height))
-         return i
+             i = None
+             
+             if as_tensors:
+                 i = []
+             else:
+                 i = SoundImage(int(np.sqrt(diff)*0.7*(ratio)), int(np.sqrt(diff)*0.7*(1/ratio)), samplerate)
+                 i.compressed = compress
+    
+             if compress==False:
+                 diff=0
+             if log:
+                 print("image initialized, begin: "+str(sample_begin)+" end: "+str(sample_end))
+    
+             counter = 0
+             pixel = 0
+             index = sample_begin
+             while index<sample_end-diff/2:
+                if counter>len(data)/20:
+                    if log:
+                        print("status: "+str(index)+"/"+str(data[index]))
+                    counter=0
+                counter+=1
+                
+                if as_tensors:
+                    if pixel<limiter:
+                        
+                        if index>=len(data):
+                            val = ((data[0][0]+data[0][1])/2)*multiplier+offset
+                        else:
+                            val = ((data[index][0]+data[index][1])/2)*multiplier+offset
+                                    
+                        val = max(0, min(val, 1))
+                        
+                        if uLawEncode!=-1:
+                            i.append(Encoder.uLawEncode(val, uLawEncode))
+                        else:
+                            i.append(val)
+                else:
+                    if pixel<i.getSize():
+                        if compress:
+                            i.setPixelAtIndex(pixel, data[index][0]*multiplier+offset, data[index][1]*multiplier+offset, data[sample_end-index-1][0]*multiplier+offset, data[sample_end-index-1][1]*multiplier+offset)
+                        else:
+                            i.setPixelAtIndex(pixel, data[index][0]*multiplier+offset, data[index][1]*multiplier+offset, 0, 255)
+    
+                #f.write(data*2)
+    
+                index+=1
+                pixel+=1
+    
+             if log:
+                 print("image generated: "+str(i.width)+"x"+str(i.height))
+                 
+             self.cache[sample_begin] = i
+             
+             return i
 
      def ImageToSound(self, image:SoundImage, path, multiplier=5000):
          samplerate = image.sample_rate
@@ -729,14 +1035,23 @@ class SoundConverter:
          return new_data
          
      def Extract(self, start_frame, end_frame, offset=127, multiplier=2048, uLawEncode = -1):
-         data = self.getFlatData(offset, multiplier, uLawEncode)
-         extract = data[start_frame:end_frame]
+         #print("start_frame: "+str(start_frame)+" end_frame: "+str(end_frame))
          sample_len = end_frame-start_frame
-         
-         if len(extract)<sample_len:
-             extract = [0.5]*(sample_len-len(extract))+extract
-            
-         return extract
+         flat_data = []
+         for k in range(sample_len):
+             i = start_frame+k
+             if i<0:
+                 val = (0.5)
+             elif i>=len(self.data):
+                 val = (0.5)
+             else:
+                 val = ((self.data[i][0]+self.data[i][1])*0.5*multiplier+offset)
+                 
+             if uLawEncode!=-1:
+                flat_data.append(Encoder.uLawEncode(val, uLawEncode))
+             else:
+                flat_data.append(val)
+         return flat_data
          
      def getFlatData(self, offset=127, multiplier=2048, uLawEncode = -1):
          if self.flat_data==None:
@@ -825,6 +1140,42 @@ class SoundConverter:
          self.data = container
          self.samplerate = samplerate
          
+     def resample_target(self, samplerate, container):
+
+         container = container[0:len(container):int(self.samplerate/samplerate)]
+
+         return container
+         
+     def resampleAsAmplitude(self, samplerate):
+        new_data = []
+        bloc_size = int(self.samplerate/samplerate)
+        print("bloc_size: " +str(bloc_size))
+        for d in range(int(len(self.data)/bloc_size)):
+            _sum = 0
+            for b in range(bloc_size):
+                _sum+=abs(self.data[d*bloc_size+b][0])
+            _sum /= bloc_size
+            new_data.append([_sum, _sum])
+            
+        self.data = new_data
+        self.samplerate = samplerate
+         
+     def resample_derivative(self, samplerate):
+         import scipy.signal as sps
+
+         container = []
+         for d in self.derivated_data:
+             container.append(d[0])
+
+         container = container[0:len(container):int(self.samplerate/samplerate)]
+         
+         for d in range(len(container)):
+             container[d] = [container[d], container[d]]
+
+         self.derivated_data = container
+         self.samplerate = samplerate
+         
+         
 class Encoder:
     def OneHot(data, labels=32, offset=0):
         output = []
@@ -851,9 +1202,32 @@ class Encoder:
                 output=output+row
                  
         return output
+
+        
+    def uLaw(x, mu=8):
+        return np.sign(x)*np.log(1+mu*abs(x))/np.log(1+mu)
+        
+    def uLawInvert(x, mu=8):
+        a = mu
+        k = 1/np.log(1+a)
+        u = abs(x)
+        return np.sign(x)*(np.exp(u/k)-1)/a
         
     #uLaw, default 8bit (256)
-    def uLawEncode(data, u=1024):
+    def uLawEncode(data, u=1024, real_uLaw=False, quantification=True):
+        
+        if quantification:
+            data = np.floor(data/(1/u))*(1/u)
+        
+        if real_uLaw:
+            data = (Encoder.uLaw(data*2-1)+1)/2
+        
+        return data
+        
+    def uLawDecode(data):
+        return (Encoder.uLawInvert((data-0.5)*2)+1)/2
+
+    def quantify(data, u=256):
         return np.floor(data/(1/u))*(1/u)
         
     def max_value(data=[]):
@@ -869,8 +1243,10 @@ class Encoder:
     def avg(data=[], steps=-1):
         if steps <= 0:
             _sum = 0
+            
             for v in data:
                 _sum+=v
+                
             return _sum/len(data)
         else:
             _sum = 0
@@ -892,8 +1268,36 @@ class Encoder:
         
             return _sum/divider
             
-    def entropy(data=[], ground=0.5):
+    def entropy(data=[], ground=0.5, multiplier = 3):
         _sum = 0
+        _len = max(1, len(data))
         for v in data:
-            _sum+=abs(v-ground)
-        return _sum/len(data)
+            _sum+=abs(v-ground)*multiplier
+        return min(0.99, _sum/_len)
+        
+    def rangeFactor(t, point, _range):
+        ratio = np.abs (point - t) / _range;
+        if ratio < 1:
+            return 1 - ratio;
+        else:
+            return 0;
+            
+    def get_frequency(signal, zero_thresh=0.5, multiplier=1, auto_thresh=True, differential=False):
+        if differential:
+            dif = np.diff(signal)
+            
+            for i in range(len(dif)):
+                dif[i] = np.abs(dif[i])
+                
+            return np.average(dif)
+        else:
+            if(auto_thresh):
+                zero_thresh = np.average(signal)
+            
+            zero_crossings = 0
+            for i in range(len(signal)-1):
+                if(signal[i]<=zero_thresh and signal[i+1]>zero_thresh) or (signal[i]>=zero_thresh and signal[i+1]<zero_thresh):
+                    zero_crossings+=1
+         
+            return zero_crossings*multiplier
+        
