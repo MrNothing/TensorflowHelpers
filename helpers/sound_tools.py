@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Mon Feb 13 22:11:47 2017
-
 @author: Boris
 """
 
@@ -509,6 +508,7 @@ class SoundLoader:
                          batch_size, 
                          shuffle_rate=-1, 
                          n_reccurent_input = 0,
+                         time_theory = False,
                          ):
         images = []
         labels = []
@@ -586,6 +586,13 @@ class SoundLoader:
                     image = samples + image
                 elif n_reccurent_input !=0:
                     past_img = converter.Extract(last_start_index-n_reccurent_input, last_start_index, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                    past_images.append(past_img)
+                    
+                elif time_theory:
+                    t = (last_start_index/self.fixed_size)*np.pi*2
+                    #todo, we could use gradients to increment t?
+                    
+                    past_img = [np.sin(t)/2, np.cos(t)/2]+0.5
                     past_images.append(past_img)
                     
                 elif self.entropy != None:
@@ -1300,4 +1307,3 @@ class Encoder:
                     zero_crossings+=1
          
             return zero_crossings*multiplier
-        

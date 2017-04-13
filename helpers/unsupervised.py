@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Created on Wed Apr  5 21:57:10 2017
-
 @author: Boris
 """
 
@@ -141,10 +140,11 @@ class AutoEncoder:
                  loader,
                  hidden=[256, 128],
                  cells = [32],
-                 learning_rate = 0.01,
+				 learning_rate = 0.01,
                  batch_size = 128,
                  training_iters = 10000,
                  n_reccurent_input = 0,
+				 time_theory = False,
                  rnn = False,
                  vae = False,
                  n_z = 20,
@@ -161,7 +161,7 @@ class AutoEncoder:
         self.index_step = 256
         self.vae = vae
         self.n_z = n_z
-        
+        self.time_theory = time_theory
         
         tf.reset_default_graph() 
         
@@ -183,10 +183,6 @@ class AutoEncoder:
     # Building the encoder
     def encoder(self, graph):
          print(graph.name+"    "+str(graph.get_shape()))
-         
-         if self.loader.n_steps>0:
-            self.encoder = GRUencoder(graph)
-        
          
          # Encoder Hidden layer with sigmoid activation #1
          graph = tf.nn.sigmoid(
@@ -267,8 +263,8 @@ class AutoEncoder:
                                    )
              print(graph.name+"    "+str(graph.get_shape()))
 
-        w_mean = tf.nn.sigmoid(dense(graph, self.hidden[i], self.n_z), name= "w_mean")
-        w_stddev = tf.nn.sigmoid(dense(graph, self.hidden[i], self.n_z), name ="w_stddev")
+        w_mean = tf.nn.sigmoid(dense(graph, self.hidden[i], self.n_z, name= "w_mean"), name= "w_mean")
+        w_stddev = tf.nn.sigmoid(dense(graph, self.hidden[i], self.n_z, name= "w_stddev"), name ="w_stddev")
 
         print(w_mean.name+"    "+str(w_mean.get_shape()))
         print(w_stddev.name+"    "+str(w_stddev.get_shape()))
@@ -279,7 +275,7 @@ class AutoEncoder:
     def vae_decoder(self, graph):
         print("vae_decoder")
         print(graph.name+"    "+str(graph.get_shape()))
-        graph = tf.nn.sigmoid(dense(graph, self.n_z, self.hidden[len(self.hidden)-1], scope='z_matrix'))
+        graph = tf.nn.sigmoid(dense(graph, self.n_z, self.hidden[len(self.hidden)-1], scope='z_matrix', name = "z_matrix"))
         print(graph.name+"    "+str(graph.get_shape()))
         
         for index in range(len(self.hidden)-1):
@@ -301,7 +297,9 @@ class AutoEncoder:
         print(graph.name+"    "+str(graph.get_shape()))
 
         return graph
+        
          
+	#Trains the model
     def Train(self, 
               save_path="", 
               restore_path="", 
@@ -344,9 +342,14 @@ class AutoEncoder:
             # Construct model
             encoder_op = self.encoder(x)
             
-            x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
             if self.n_reccurent_input==0:
                 x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]], name="x2_input")
+            elif self.time_theory:
+                self.n_reccurent_input = 2
+                x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
+            else:
+                x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
+            
             decoder_op = self.decoder(x2)
         
         # Prediction
@@ -407,7 +410,11 @@ class AutoEncoder:
                          else:
                              batch = self.loader.getNextBatch(self.batch_size)[0]
                      else:
-                         batch = self.loader.getNextBatch(self.batch_size, n_reccurent_input = self.n_reccurent_input)
+                         if self.time_theory:
+                            batch = self.loader.getNextBatch(self.batch_size, time_theory = True)
+                         else:
+                            batch = self.loader.getNextBatch(self.batch_size, n_reccurent_input = self.n_reccurent_input)
+                         
                          past_batch = batch[2]
                          batch = batch[0]
                      
@@ -439,7 +446,8 @@ class AutoEncoder:
                     print ("Model saved in file: %s" % s_path)
             
             sess.close()
-            
+    
+	#Generates a feature/sequence index from a raw sequence
     def IndexSequence(self, 
                         sequence,
                         restore_path="",
@@ -484,7 +492,10 @@ class AutoEncoder:
                 code_id = self.getCodeId(code)
                 
                 if self.index.__contains__(code_id)==False:
-                    self.index[code_id]=[sample, code]
+                    self.index[code_id]=[[sample], [code]]
+                else:
+                    self.index[code_id][0].append(sample)
+                    self.index[code_id][1].append(code)
                 
                 if i%display_step==0:
                     print("status: "+str(i)+"/"+str(len(sequence)-self.n_input)+" categories: "+str(len(self.index)))
@@ -496,13 +507,14 @@ class AutoEncoder:
         
         return self.index
         
+	#Generates a decoded sequence from an index buffer and a feature map using n-dimentional trees
     def DecodeSequenceWithIndex(self, 
                         feature_maps,
                         restore_path="",
                         display_step = 10,
                         ):
         
-        self.index = self.load_output(restore_path+"/features_index")
+        self.index = self.load_output(restore_path+"/features_index")   
         
         self.result = []
         i=1
@@ -519,21 +531,37 @@ class AutoEncoder:
     def try_get_sample(self, code):
         code_id = self.getCodeId(code)
         if self.index.__contains__(code_id):
-            return self.index[code_id][0]
+            return self.getNearestSubSample(code, self.index[code_id])
         else:
-            return self.index[self.getNearestSample(code)][0]
+            index = self.getNearestSample(code)
+            return self.getNearestSubSample(code, self.index[index])
             
     def getNearestSample(self, code):
         best_dist = 9999999999
         dist = -1
         chosen_index = None
         for i in self.index:
-            dist = self.getDistance(code, self.index[i][1])
+            dist = self.getDistance(code, self.index[i][1][0])
             if dist<best_dist:
                 chosen_index = i
                 best_dist = dist
         return chosen_index
-            
+        
+    def getNearestSubSample(self, code, subset):
+        best_dist = 9999999999
+        chosen_sample = None
+        length = len(subset[1])
+        for i in range(length):
+            dist = self.getDistance(code, subset[1][i])
+            if dist<best_dist:
+                chosen_sample = subset[0][i]
+                best_dist = dist
+                
+        if chosen_sample==None:
+            print("Error!")
+        
+        return chosen_sample
+                
     def getDistance(self, tensorA, tensorB):
         dist = 0
         for i in range(len(tensorA)):
@@ -547,21 +575,33 @@ class AutoEncoder:
             code_id += str(np.floor(i*index_step)/index_step)+"_"
         return code_id
             
-            
+    #Simple Denoising Method
     def EncodeAndDecode(self, 
                         _input,
                         restore_path="",
-                        n_input = None,
               ):
+        
+        encoder_op = None
+        decoder_op = None
         
         # tf Graph input (only pictures)
         x = tf.placeholder("float", [None, self.n_input], name="x_input")
-        if n_input!=None:
-            x = tf.placeholder("float", [None, n_input], name="x_input")
         
-        # Construct model
-        encoder_op = self.encoder(x)
-        decoder_op = self.decoder(encoder_op)
+        if self.vae:
+             # tf Graph input (only pictures)
+            x = tf.placeholder("float", [None, self.n_input], name="x_input")
+            
+            # Construct model
+            z_mean, z_stddev = self.vae_encoder(x)
+            samples = tf.random_normal([self.batch_size,self.n_z],0,1,dtype=tf.float32)
+            encoder_op = z_mean + (z_stddev * samples)
+    
+            decoder_op = self.vae_decoder(encoder_op)
+        else:
+            
+            # Construct model
+            encoder_op = self.encoder(x)
+            decoder_op = self.decoder(encoder_op)
 
         # Initializing the variables
         init = tf.global_variables_initializer()
@@ -586,7 +626,7 @@ class AutoEncoder:
             
         return self.result
         
-        
+    #Simple Encode Method
     def Encode(self, 
                         _input,
                         restore_path="",
@@ -625,13 +665,13 @@ class AutoEncoder:
             
         return self.result
         
-        
+    #Simple Decode Method
     def Decode(self, 
                         _input,
                         restore_path=""):
         
         # tf Graph input (only pictures)
-        X = tf.placeholder("float", [None, self.n_input])
+        X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]], name="x2_input")
         
         # Construct model
         #encoder_op = self.encoder(X)
@@ -661,7 +701,7 @@ class AutoEncoder:
         return self.result
         
     """
-        return N channels of features from a sequence based on the last layer of features
+        returns N channels of features from a sequence based on the last layer of features
     """
     def EncodeSequence(self, 
                         sequence,
@@ -713,8 +753,7 @@ class AutoEncoder:
             for i in range(len(sequence)-self.n_input):
                 sample = sequence[i:i+self.n_input]
                 if i%compression_rate == 0:
-                    if self.vae:
-                        self.result.append(sess.run(encoder_op, feed_dict={X: [sample]})[0])
+                    self.result.append(sess.run(encoder_op, feed_dict={X: [sample]})[0])
                         
                 if i%display_step==0:
                     print("status: "+str(i)+"/"+str(len(sequence)-self.n_input))
@@ -723,7 +762,9 @@ class AutoEncoder:
             
         return self.result
         
-        
+    """
+        returns a low level decoded sequence from a feature map
+    """
     def DecodeSequence(self, 
                         feature_maps,
                         restore_path="",
@@ -735,18 +776,23 @@ class AutoEncoder:
                         ):
         
         tf.reset_default_graph() 
-        # tf Graph input (only pictures)
         
         X = None
         decoder_op = None
         
         if self.vae:
-            X = tf.placeholder("float", [None, self.n_z])
+            X = tf.placeholder("float", [None, self.n_z], name="x2_input")
             decoder_op = self.vae_decoder(X)
         else:
-            X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="reccurent_x2_input")
+			
             if self.n_reccurent_input==0:
                 X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]], name="x2_input")
+            elif self.time_theory:
+                self.n_reccurent_input = 2
+                X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
+            else:
+                X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
+		
             # Construct model
             decoder_op = self.decoder(X)
         
@@ -808,18 +854,7 @@ class AutoEncoder:
                             
                         res = sess.run(decoder_op, feed_dict={X: [features]})
                         self.result.append(res[0][0])
-                elif gaussian_mixture:
-                    i = index+1
-                    
-                    for c in range(compression_rate):
-                        features = []
-                        t = c/compression_rate
-                        
-                        for f in range(len(feature_maps[i])):
-                            features.append(self.lerp(feature_maps[i-1][f], feature_maps[i][f], t))
-                            
-                        res = sess.run(decoder_op, feed_dict={X: [features]})
-                        self.result.append(res[0][0])
+                
                 else:
                     i = index
                     features = []
@@ -827,7 +862,12 @@ class AutoEncoder:
                         features.append(feature_maps[i][f])
                         
                     if self.n_reccurent_input>0:
-                        features += self.extract_result(len(self.result)-1-self.n_reccurent_input, len(self.result)-1)
+                        if self.time_theory:
+                            #todo, we could use gradients to increment t?
+                            t = ((i*compression_rate)/self.loader.fixed_size)*np.pi*2
+                            features += [np.sin(t)/2, np.cos(t)/2]+0.5
+                        else:
+                            features += self.extract_result(len(self.result)-1-self.n_reccurent_input, len(self.result)-1)
                     
                     res = sess.run(decoder_op, feed_dict={X: [features]})
                     
@@ -891,5 +931,4 @@ class AutoEncoder:
                 dist = c_dist+delta_dist
                 index = i
         return index
-        
         
