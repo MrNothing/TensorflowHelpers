@@ -93,6 +93,7 @@ class SoundCombiner:
             return self.image_width*self.image_width
     def getImageWidth(self):
         return self.image_width 
+        
 class SoundLoader:
     def __init__(self, 
                  sound,
@@ -133,6 +134,7 @@ class SoundLoader:
         self.insert_input_amplitude = insert_input_amplitude
         self.input_is_amplitude = input_is_amplitude
         self.segment = False
+        self.advanced_time_theory = False
         
         self.cache = {}
         
@@ -509,6 +511,7 @@ class SoundLoader:
                          shuffle_rate=-1, 
                          n_reccurent_input = 0,
                          time_theory = False,
+                         label_as_first = False,
                          ):
         images = []
         labels = []
@@ -537,6 +540,9 @@ class SoundLoader:
             
             #LABEL DETECTION
             label = image[len(image)-self.extract_length+self.label_offset:len(image)+self.label_offset]
+
+            if label_as_first:
+                label = [image[0]]
             
             if self.label_is_derivative:
                 freq = Encoder.get_frequency(image, 0.5, 0.1)
@@ -589,10 +595,15 @@ class SoundLoader:
                     past_images.append(past_img)
                     
                 elif time_theory:
-                    t = (last_start_index/self.fixed_size)*np.pi*2
-                    #todo, we could use gradients to increment t?
-                    
-                    past_img = [np.sin(t)/2, np.cos(t)/2]+0.5
+                    t = 0
+                    if self.advanced_time_theory:
+                        small_sample = converter.Extract(last_start_index-self.fixed_size, last_start_index, multiplier=1, offset=0, uLawEncode = self.uLawEncode)
+                        small_sample = Encoder.normalize(None, small_sample)
+                        freq = Encoder.get_frequency(small_sample, 0, 0.1, differential=True)
+                        t = (last_start_index/self.fixed_size)*np.pi*2*freq
+                    else:
+                        t = (last_start_index/self.fixed_size)*np.pi*2
+                    past_img = [np.sin(t)/2+0.5, np.cos(t)/2+0.5]
                     past_images.append(past_img)
                     
                 elif self.entropy != None:
@@ -922,10 +933,10 @@ class SoundConverter:
             fmap.append(amp)
          return fmap
              
-     def getRawAudio(self):
+     def getRawAudio(self, multiplier=1):
          output = []
          for i in self.data:
-             output.append(i[0]+0.5)
+             output.append(i[0]*multiplier+0.5)
              
          return output
          
@@ -1307,3 +1318,13 @@ class Encoder:
                     zero_crossings+=1
          
             return zero_crossings*multiplier
+            
+    def normalize(sample):
+        _max = 0
+        for m in sample:
+            if abs(m)>_max:
+                _max = abs(m)
+                
+        for i in range(len(sample)):
+            sample[i] = sample[i]/_max
+        return sample

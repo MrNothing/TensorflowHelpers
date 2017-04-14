@@ -12,6 +12,7 @@ import pickle
 import random as rand
 from helpers.sound_tools import Encoder
 from helpers.operators import *
+from IPython.display import clear_output
 
 class FeatureMap:
     def __init__(self,  extract_length = 16):
@@ -138,14 +139,17 @@ class StackedAutoEncoders:
 class AutoEncoder:
     def __init__(self,
                  loader,
-                 hidden=[256, 128],
+                 hidden = [256, 128],
+                 decoder_hidden = None,
                  cells = [32],
-				 learning_rate = 0.01,
+                 learning_rate = 0.01,
                  batch_size = 128,
                  training_iters = 10000,
                  n_reccurent_input = 0,
-				 time_theory = False,
+                 time_theory = False,
+                 advanced_time_theory = False,
                  rnn = False,
+                 guess_one_hot = -1,
                  vae = False,
                  n_z = 20,
                  ):
@@ -161,7 +165,20 @@ class AutoEncoder:
         self.index_step = 256
         self.vae = vae
         self.n_z = n_z
-        self.time_theory = time_theory
+        self.guess_one_hot = guess_one_hot
+        
+        if decoder_hidden==None:
+            decoder_hidden = hidden
+        
+        self.decoder_hidden = decoder_hidden
+		
+        if time_theory:
+            self.time_theory = time_theory
+            self.advanced_time_theory = advanced_time_theory
+            self.loader.advanced_time_theory = advanced_time_theory
+        else:
+            self.time_theory = False
+            self.advanced_time_theory = False
         
         tf.reset_default_graph() 
         
@@ -210,7 +227,7 @@ class AutoEncoder:
          print(graph.name+"    "+str(graph.get_shape()))
          # Decoder Hidden layer with sigmoid activation
          first = True
-         for index in range(len(self.hidden)-1):
+         for index in range(len(self.decoder_hidden)-1):
              reccurent_bonus = 0
              if first:
                  reccurent_bonus = self.n_reccurent_input
@@ -219,14 +236,14 @@ class AutoEncoder:
              i = index+1
              graph = tf.nn.sigmoid(
                                tf.add(
-                                      tf.matmul(graph, tf.Variable(tf.random_normal([self.hidden[len(self.hidden)-i]+reccurent_bonus, self.hidden[len(self.hidden)-i-1]]), name="decode_matmul_"+str(i))), 
-                                      tf.Variable(tf.random_normal([self.hidden[len(self.hidden)-i-1]]), name="decode_bias_"+str(i))
+                                      tf.matmul(graph, tf.Variable(tf.random_normal([self.decoder_hidden[len(self.decoder_hidden)-i]+reccurent_bonus, self.decoder_hidden[len(self.decoder_hidden)-i-1]]), name="decode_matmul_"+str(i))), 
+                                      tf.Variable(tf.random_normal([self.decoder_hidden[len(self.decoder_hidden)-i-1]]), name="decode_bias_"+str(i))
                                     )
                                 )
              print(graph.name+"    "+str(graph.get_shape()))
          graph = tf.nn.sigmoid(
                                tf.add(
-                                      tf.matmul(graph, tf.Variable(tf.random_normal([self.hidden[0], self.n_input]), name="decode_matmul_end")), 
+                                      tf.matmul(graph, tf.Variable(tf.random_normal([self.decoder_hidden[0], self.n_input]), name="decode_matmul_end")), 
                                       tf.Variable(tf.random_normal([self.n_input]), name="decode_bias_end")
                                     )
                                 )
@@ -298,16 +315,24 @@ class AutoEncoder:
 
         return graph
         
-         
-	#Trains the model
+    def Run(self, 
+              save_path="", 
+              restore_path="", 
+              display_step = 10,
+              ):
+        return self.Train(restore_path, restore_path, display_step)
+    
+    #Trains the model
     def Train(self, 
               save_path="", 
               restore_path="", 
               display_step = 10,
-              n_input = None,
               ):
         
         tf.reset_default_graph() 
+        
+        self.loss_log = []
+        self.acc_log = []
         
         x = None
         encoder_op = None
@@ -320,10 +345,22 @@ class AutoEncoder:
         latent_loss = None
         
         if self.rnn:
-            x = tf.placeholder("float", [None, self.n_input, 1], name="x_input")
-            encoder_op = self.GRUencoder(x, self.hidden[0])
-            x2 = tf.placeholder("float", [None, self.hidden[0]], name="x_input")
-            decoder_op = self.GRUencoder(x2, self.n_input)
+            x = tf.placeholder("float", [None, self.n_input], name="x_input")
+            encoder_op = self.encoder(x)
+            
+            if self.n_reccurent_input==0:
+                x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1], 1], name="x_input")
+            elif self.time_theory:
+                self.n_reccurent_input = 2
+                x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input, 1], name="x2_input")
+            else:
+                x2 = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input, 1], name="x2_input")
+                
+            if self.guess_one_hot>0:
+                decoder_op = self.GRUencoder(x2, self.guess_one_hot, "x2_input")
+            else:
+                decoder_op = self.GRUencoder(x2, self.n_input, "x2_input")
+                
         elif self.vae:
              # tf Graph input (only pictures)
             x = tf.placeholder("float", [None, self.n_input], name="x_input")
@@ -355,7 +392,12 @@ class AutoEncoder:
         # Prediction
         y_pred = decoder_op
         # Targets (Labels) are the input data.
-        y_true = x
+        y_true = None
+        
+        if self.guess_one_hot>0:
+            y_true = tf.placeholder("float", [None, self.guess_one_hot], name="y_true")
+        else:
+            y_true = x
         
         # Define loss and optimizer, minimize the squared error
         cost = tf.reduce_mean(tf.pow(y_true - y_pred, 2))
@@ -366,6 +408,10 @@ class AutoEncoder:
             latent_loss = 0.5 * tf.reduce_sum(tf.square(z_mean) + tf.square(z_stddev) - tf.log(tf.square(z_stddev)) - 1,1)
             cost = tf.reduce_mean(generation_loss + latent_loss)
             optimizer = tf.train.AdamOptimizer(self.learning_rate).minimize(cost)
+            
+        # Evaluate model
+        correct_pred = tf.equal(tf.argmax(y_pred, 1), tf.argmax(y_true, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
         
         # Initializing the variables
         init = tf.global_variables_initializer()
@@ -403,12 +449,13 @@ class AutoEncoder:
                      
                     
                      batch=None
+                     labels=None
                      past_batch=[]
                      if self.n_reccurent_input<=0:
-                         if self.rnn:
-                             batch = self.loader.getNextTimeBatch(self.batch_size, n_steps = self.n_input)[0]
-                         else:
-                             batch = self.loader.getNextBatch(self.batch_size)[0]
+                         batch = self.loader.getNextBatch(self.batch_size, label_as_first=True)
+                         labels = batch[1]
+                         batch = batch[0]
+                         
                      else:
                          if self.time_theory:
                             batch = self.loader.getNextBatch(self.batch_size, time_theory = True)
@@ -416,11 +463,12 @@ class AutoEncoder:
                             batch = self.loader.getNextBatch(self.batch_size, n_reccurent_input = self.n_reccurent_input)
                          
                          past_batch = batch[2]
+                         labels = batch[1]
                          batch = batch[0]
                      
                      # Run optimization op (backprop) and cost op (to get loss value)
                      tmp_output = sess.run(encoder_op, feed_dict={x: batch})
-                     
+                         
                      fused_input = []
                      
                      if len(past_batch)>0:
@@ -428,13 +476,32 @@ class AutoEncoder:
                              fused_input.append(tmp_output[i].tolist()+past_batch[i])
                      else:
                          fused_input = tmp_output
+                         
+                     if self.rnn:
+                         fused_input = np.reshape(fused_input, (self.batch_size, self.hidden[len(self.hidden)-1]+self.n_reccurent_input, 1))
                      
-                     _, c = sess.run([optimizer, cost], feed_dict={x: batch, x2: fused_input})
-                     
+                     c= None
+                     acc = None
+                     if self.guess_one_hot>0:
+                        _, c, acc = sess.run([optimizer, cost, accuracy], feed_dict={x: batch, x2: fused_input, y_true:labels})
+                     else:
+                        _, c, acc = sess.run([optimizer, cost, accuracy], feed_dict={x: batch, x2: fused_input})
                      # Display logs per epoch step
                      if step % display_step == 0:
-                        print("step:", '%04d' % (step),
-                              "cost=", "{:.9f}".format(c)+" cache: "+str(int(len(self.loader.cache)/(len(self.loader.converter.data))*10000)/100)+"%")
+                         self.loss_log.append(c)
+                         self.acc_log.append(acc)
+                         
+                         clear_output()
+                         plt.plot(self.acc_log)
+                         plt.ylabel("Accuracy")
+                         plt.show()
+                         plt.plot(self.loss_log, color="red")
+                         plt.ylabel("Loss")
+                         plt.show()
+                        
+                         
+                         print("step:", '%04d' % (step),
+                              "cost=", "{:.9f}".format(c)+" acc: "+"{:.5f}".format(acc)+" cache: "+str(int(len(self.loader.cache)/(len(self.loader.converter.data))*10000)/100)+"%")
                     
                  step+=1
         
@@ -507,7 +574,7 @@ class AutoEncoder:
         
         return self.index
         
-	#Generates a decoded sequence from an index buffer and a feature map using n-dimentional trees
+    #Generates a decoded sequence from an index buffer and a feature map using n-dimentional trees
     def DecodeSequenceWithIndex(self, 
                         feature_maps,
                         restore_path="",
@@ -783,8 +850,21 @@ class AutoEncoder:
         if self.vae:
             X = tf.placeholder("float", [None, self.n_z], name="x2_input")
             decoder_op = self.vae_decoder(X)
+        elif self.rnn:
+            if self.n_reccurent_input==0:
+                X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1], 1], name="x2_input")
+            elif self.time_theory:
+                self.n_reccurent_input = 2
+                X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input, 1], name="x2_input")
+            else:
+                X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input, 1], name="x2_input")
+            
+            if self.guess_one_hot>0:
+                decoder_op = self.GRUencoder(X, self.guess_one_hot, "x2_input")
+            else:
+                decoder_op = self.GRUencoder(X, self.n_input, "x2_input")
         else:
-			
+            
             if self.n_reccurent_input==0:
                 X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]], name="x2_input")
             elif self.time_theory:
@@ -792,7 +872,7 @@ class AutoEncoder:
                 X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
             else:
                 X = tf.placeholder("float", [None, self.hidden[len(self.hidden)-1]+self.n_reccurent_input], name="x2_input")
-		
+        
             # Construct model
             decoder_op = self.decoder(X)
         
@@ -860,24 +940,72 @@ class AutoEncoder:
                     features = []
                     for f in range(len(feature_maps[i])):
                         features.append(feature_maps[i][f])
-                        
-                    if self.n_reccurent_input>0:
-                        if self.time_theory:
-                            #todo, we could use gradients to increment t?
-                            t = ((i*compression_rate)/self.loader.fixed_size)*np.pi*2
-                            features += [np.sin(t)/2, np.cos(t)/2]+0.5
-                        else:
-                            features += self.extract_result(len(self.result)-1-self.n_reccurent_input, len(self.result)-1)
                     
-                    res = sess.run(decoder_op, feed_dict={X: [features]})
+                    if self.guess_one_hot>0:
+                        if i%display_step==0:
+                            clear_output()
+                            plt.plot(self.result)
+                            plt.ylabel("Result")
+                            plt.show()
+                            plt.plot(feature_maps)
+                            plt.ylabel("feature_maps")
+                            plt.show()
+                            
+                        for c in range(compression_rate):
+                            _features = []
+                            if self.n_reccurent_input>0:
+                                if self.time_theory:
+                                    t = 0
+                                    if self.advanced_time_theory:
+                                        small_sample = self.extract_result(len(self.result)-1-self.loader.fixed_size, -0.5)
+                                        small_sample = Encoder.normalize(None, small_sample)
+                                        freq = Encoder.get_frequency(small_sample, 0, 0.1, differential=True)
+                                        t = (len(self.result)/self.fixed_size)*np.pi*2*freq
+                                    else:
+                                        t = (len(self.result)/self.fixed_size)*np.pi*2
+                                    _features = [np.sin(t)/2+0.5, np.cos(t)/2+0.5]
+                                else:
+                                    _features = self.extract_result(len(self.result)-1-self.n_reccurent_input, len(self.result)-1)
+                            
+                            _features = features+_features
+                                    
+                            if self.rnn:
+                                _features = np.reshape(_features, (len(_features), 1))
+                                    
+                            res = sess.run(decoder_op, feed_dict={X: [_features]})
                     
-                    for c in range(compression_rate):
-                        val = res[0][c]
-
-                        if (val<0.05 or val>0.95) and len(self.result)>0:
-                            val = self.result[len(self.result)-1]
-
-                        self.result.append(val)
+                            val = self.max_index(res[0])/self.guess_one_hot
+                            self.result.append(val)
+                    else:
+                        _features = []
+                        if self.n_reccurent_input>0:
+                            if self.time_theory:
+                                t = 0
+                                if self.advanced_time_theory:
+                                    small_sample = self.extract_result(len(self.result)-1-self.loader.fixed_size, -0.5)
+                                    small_sample = Encoder.normalize(None, small_sample)
+                                    freq = Encoder.get_frequency(small_sample, 0, 0.1, differential=True)
+                                    t = (len(self.result)/self.fixed_size)*np.pi*2*freq
+                                else:
+                                    t = (len(self.result)/self.fixed_size)*np.pi*2
+                                _features = [np.sin(t)/2+0.5, np.cos(t)/2+0.5]
+                            else:
+                                _features = self.extract_result(len(self.result)-1-self.n_reccurent_input, len(self.result)-1)
+                         
+                        _features = features+_features
+                                
+                        if self.rnn:
+                            _features = np.reshape(_features, (len(_features), 1))
+                                
+                        res = sess.run(decoder_op, feed_dict={X: [_features]})
+                    
+                        for c in range(compression_rate):
+                            val = res[0][c]
+    
+                            if (val<0.05 or val>0.95) and len(self.result)>0:
+                                val = self.result[len(self.result)-1]
+    
+                            self.result.append(val)
                         
                 if i%display_step==0:
                     print("status: "+str(i)+"/"+str(len(feature_maps)))
@@ -888,20 +1016,20 @@ class AutoEncoder:
             
         return self.result
     
-    def extract_result(self, start_frame, end_frame):
+    def extract_result(self, start_frame, end_frame, offset=0):
          extract = []
          i = start_frame
          
          while i<end_frame:
              val = 0
              if i<0:
-                 val = (0.5)
+                 val = (0.5+offset)
              elif i>=len(self.result):
-                 val = (0.5)
+                 val = (0.5+offset)
              else:
-                 val = self.result[i]
+                 val = self.result[i]+offset
 
-             extract.append(Encoder.uLawEncode(val, self.loader.uLawEncode, False))
+             extract.append(val)
                 
              i+=1
                 
@@ -919,6 +1047,19 @@ class AutoEncoder:
         else:
             return 0;
             
+    def max_index(self=None, data=[]):
+        _max = 0
+        _max_index = -1
+        for i in range(len(data)):
+            if data[i]>_max:
+                _max_index = i
+                _max = data[i]
+                
+        if(_max_index==-1):
+            _max_index = int(len(data)/2)
+                
+        return _max_index
+            
     def getNearestIndexFromStart(self, array, value = 0, t_delta = 0, length = 10):
         dist = 99999999999
         index = -1
@@ -931,4 +1072,3 @@ class AutoEncoder:
                 dist = c_dist+delta_dist
                 index = i
         return index
-        
