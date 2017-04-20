@@ -151,8 +151,8 @@ class GRUOperation:
         
         val = tf.transpose(val, [1, 0, 2])
         last = tf.gather(val, int(val.get_shape()[0]) - 1)
-        weight = tf.Variable(tf.truncated_normal([self.cells[len(self.cells)-1], self.bias]))
-        bias = tf.Variable(tf.constant(0.1, shape=[self.bias]))
+        weight = tf.Variable(tf.truncated_normal([self.cells[len(self.cells)-1], self.bias]), name=self.name+"_weight")
+        bias = tf.Variable(tf.constant(0.1, shape=[self.bias]), name=self.name+"_bias")
         obj = tf.matmul(last, weight) + bias
 
         print(finalName+": "+str(self.cells)+" => "+str(obj.get_shape()))
@@ -294,10 +294,79 @@ class NNOperation:
         print(finalName+": "+str(obj.get_shape()))
             
         return obj
+ 
+# standard convolution layer
+def conv2d(x, inputFeatures, outputFeatures, name):
+    with tf.variable_scope(name):
+        w = tf.get_variable("w",[5,5,inputFeatures, outputFeatures], initializer=tf.truncated_normal_initializer(stddev=0.02))
+        b = tf.get_variable("b",[outputFeatures], initializer=tf.constant_initializer(0.0))
+        conv = tf.nn.conv2d(x, w, strides=[1,2,2,1], padding="SAME") + b
+        return conv
+
+def conv_transpose(x, inputFeatures, outputShape, name):
+    with tf.variable_scope(name):
+       
+        # h, w, out, in
+        w = tf.get_variable("w",[5,5, outputShape[-1], inputFeatures], initializer=tf.truncated_normal_initializer(stddev=0.02))
+        b = tf.get_variable("b",[outputShape[-1]], initializer=tf.constant_initializer(0.0))
+    
+        dyn_input_shape = tf.shape(x)
+        batch_size = dyn_input_shape[0]
+        outputShape = tf.pack([batch_size, outputShape[1], outputShape[2], outputShape[3]])
+        convt = tf.nn.conv2d_transpose(x, w, output_shape=outputShape, strides=[1,2,2,1])
+        return convt
         
-def dense(x, inputFeatures, outputFeatures, scope=None, with_w=False):
-    return tf.add(
-                      tf.matmul(x, tf.Variable(tf.random_normal([inputFeatures, outputFeatures]))),
-                      tf.Variable(tf.random_normal([outputFeatures]))
+def dense(x, inputFeatures, outputFeatures, scope=None, with_w=False, name = ""):
+    with tf.variable_scope(scope):
+        return tf.add(
+                      tf.matmul(x, tf.Variable(tf.random_normal([inputFeatures, outputFeatures]), name=name)),
+                      tf.Variable(tf.random_normal([outputFeatures]), name=name+"bias")
                       )
+
+def lrelu(x, leak=0.2, name="lrelu"):
+    with tf.variable_scope(name):
+        f1 = 0.5 * (1 + leak)
+        f2 = 0.5 * (1 - leak)
+        return f1 * x + f2 * abs(x)
         
+class batch_norm(object):
+    """Code modification of http://stackoverflow.com/a/33950177"""
+    def __init__(self, epsilon=1e-5, momentum = 0.9, name="batch_norm"):
+         self.epsilon = epsilon
+         self.momentum = momentum
+         self.ema = tf.train.ExponentialMovingAverage(decay=self.momentum)
+         self.name = name
+                
+    def __call__(self, x, train=True, shape=None, reuse=None):
+        
+        x = tf.reshape(x, shape)
+        shape = x.get_shape()
+        print(shape)
+        
+                            
+        if train:
+            with tf.variable_scope(self.name):
+                self.beta = tf.get_variable("beta", [shape[-1]], initializer=tf.constant_initializer(0.))
+                self.gamma = tf.get_variable("gamma", [shape[-1]],initializer=tf.random_normal_initializer(1., 0.02))
+                batch_mean, batch_var = tf.nn.moments(x, [0, 1, 2], name='moments')
+                with tf.variable_scope(tf.get_variable_scope(), reuse=False):
+                    ema_apply_op = self.ema.apply([batch_mean, batch_var])
+                self.ema_mean, self.ema_var = self.ema.average(batch_mean), self.ema.average(batch_var)
+    
+                with tf.control_dependencies([ema_apply_op]):
+                    mean, var = tf.identity(batch_mean), tf.identity(batch_var)
+        else:
+            mean, var = self.ema_mean, self.ema_var
+
+        normed = tf.nn.batch_norm_with_global_normalization(
+                x, mean, var, self.beta, self.gamma, self.epsilon, scale_after_normalization=True)
+
+        return normed
+
+#def bn(x, is_training=True, name="bn"):
+    #h2 = tf.contrib.layers.batch_norm(x, 
+    #                                  center=True, scale=True, 
+    #                                  is_training=is_training,
+    #                                  scope=name)
+    
+#    return h2

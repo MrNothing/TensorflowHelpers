@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-Created on Mon Feb 13 22:11:47 2017
-@author: Boris
+    Sound Tools:
+    
+    Contains audio loaders and several wrappers making audio extraction easier.
+    @author: Boris Musarais
 """
 
 import os
@@ -113,6 +115,7 @@ class SoundLoader:
                  random = True,
                  multiplier = 1,
                  amplitude = 1,
+				 offset = 0,
                  label_offset = 0,
                  sample_shape = [], #[[2, 20, 200]]*64
                  n_steps = -1,
@@ -229,6 +232,7 @@ class SoundLoader:
         
         self.multiplier = multiplier
         self.amplitude = amplitude
+        self.offset = offset
         
         if fixed_size<=0:
             self.image_width = int(np.sqrt(len(test_audio)))
@@ -279,7 +283,7 @@ class SoundLoader:
             print("Cache file was not found: "+cache_file)
                     
     def getExtract(self, startRatio, length):
-        return self.converter.SoundToImage(compress=False, offset=self.multiplier/2, multiplier=self.multiplier*self.amplitude, ratio=1, sample_range=[startRatio, 1], uLawEncode = self.uLawEncode, log=False, as_tensors=True)
+        return self.converter.SoundToImage(compress=False, offset=self.multiplier/2+offset, multiplier=self.multiplier*self.amplitude, ratio=1, sample_range=[startRatio, 1], uLawEncode = self.uLawEncode, log=False, as_tensors=True)
         
     def getTestTimeBatch(self, 
                          batch_size, 
@@ -525,14 +529,14 @@ class SoundLoader:
             past_img = None
             if self.random:
                 if self.input_is_amplitude==False:
-                    image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                    image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2+self.offset, uLawEncode = self.uLawEncode)
                 else:
                     image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
             elif self.segment:
                 image = converter.ExtractSegmentedSample(fixed_size=self.fixed_size+self.label_offset, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
             else:
                 if self.input_is_amplitude==False:
-                    image = converter.ExtractNextSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                    image = converter.ExtractNextSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2+self.offset, uLawEncode = self.uLawEncode)
                 else:
                     image = converter.ExtractNextSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=0, uLawEncode = self.uLawEncode)
                 
@@ -936,7 +940,14 @@ class SoundConverter:
      def getRawAudio(self, multiplier=1):
          output = []
          for i in self.data:
-             output.append(i[0]*multiplier+0.5)
+             output.append(i[0]*multiplier)
+             
+         return output
+         
+     def getNormalRawAudio(self, loader):
+         output = []
+         for i in self.data:
+             output.append(i[0]*multiplier*loader.multiplier*loader.amplitude+loader.multiplier/2)
              
          return output
          
