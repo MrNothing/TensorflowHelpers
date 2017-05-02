@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Created on Wed Apr  5 21:57:10 2017
-@author: Boris
+    Unsupervised Learning tools:
+
+    Tensorflow wrappers for Autoencoders and Variational Autoencoders
+    Includes other experimental decoders such as conditional RNN decoders and a basic feature matching decoder based on binay trees.
+    @author: Boris Musarais
+    
+    Credits:
+    #basic encoder part inspired from: https://github.com/aymericdamien/TensorFlow-Examples/blob/master/examples/3_NeuralNetworks/autoencoder.py
+    #vae part inspired from: https://github.com/kvfrans/variational-autoencoder/blob/master/main.py
 """
 
 import tensorflow as tf
@@ -14,51 +21,11 @@ from helpers.sound_tools import Encoder
 from helpers.operators import *
 from IPython.display import clear_output
 
-class FeatureMap:
-    def __init__(self,  extract_length = 16):
-        self.feature_map = None
-        self.extract_length = extract_length
-        
-    def getNextBatch(self, batch_size, n_reccurent_input=0):
-        batch = []
-        prev_batch = []
-        for i in range(batch_size):
-            start_point = rand.randint(0, len(self.feature_map)-self.extract_length)
-            batch.append(self.extract_map(start_point, start_point+self.extract_length))
-            
-            if n_reccurent_input>0:
-                prev_batch.append(self.extract_map(start_point-n_reccurent_input, start_point))
-                
-        return [batch, None, prev_batch]
-        
-    def extract_map(self, start_frame, end_frame):
-         extract = []
-         i = start_frame
-         
-         while i<end_frame:
-             val = 0
-             if i<0:
-                 val = (0.5)
-             elif i>=len(self.feature_map):
-                 val = (0.5)
-             else:
-                 val = self.feature_map[i]
-
-             extract.append(val)
-                
-             i+=1
-                
-         return extract
-         
-    def getImageBytes(self):
-         return self.extract_length
-         
-    def getMap(self):
-         res = []
-         for f in self.feature_map:
-             for u in f:
-                res.append(u) 
-         return res
+#Todo: move this in a tools file...
+def ensure_dir(file_path):
+    directory = os.path.dirname(file_path)
+    if not os.path.exists(directory):
+        os.makedirs(directory)
 
 #requires: a path containing folders with names: auto_encoder_0, auto_encoder_1 ...
 class StackedAutoEncoders:
@@ -573,6 +540,209 @@ class AutoEncoder:
         self.save_output(self.index, restore_path+"/features_index")
         
         return self.index
+        
+    #Generates a collection of [sample, latent vector, next_frame] that we will call the 'Lexicon' because it's cooler that way
+    def GenerateLexicon(self, 
+                        sequence,
+                        restore_path="",
+                        display_step = 10,
+                        ):
+        
+        tf.reset_default_graph() 
+        # tf Graph input (only pictures)
+        X = tf.placeholder("float", [None, self.n_input])
+        
+        # Construct model
+        encoder_op = self.encoder(X)
+        #decoder_op = self.decoder(encoder_op)
+        
+        # Initializing the variables
+        init = tf.global_variables_initializer()
+        
+        # 'Saver' op to save and restore all the variables
+        saver = tf.train.Saver()
+        
+        self.result = []
+        self.lexicon = []
+        
+        # Launch the graph
+        with tf.Session() as sess:
+            sess.run(init)
+            
+            if len(restore_path)>0 and os.path.exists(restore_path+"/model.meta"):
+                 # Restore model weights from previously saved model
+                #saver = tf.train.import_meta_graph(restore_path+'/model.meta')
+                load_path=saver.restore(sess, restore_path+"/model")
+                print ("Model restored from file: %s" % load_path)  
+                #TODO: restore acc_log and loss_log
+            
+            for i in range(len(sequence)-self.n_input-1):
+                sample = sequence[i:i+self.n_input]
+                code = sess.run(encoder_op, feed_dict={X: [sample]})[0]
+                next_frame = sequence[i+self.n_input+1]
+                
+                code_id = self.getCodeId(code)
+                
+                self.lexicon.append([sample, code, next_frame])
+                
+                if i%display_step==0:
+                    print("status: "+str(i)+"/"+str(len(sequence)-self.n_input))
+            
+            sess.close()
+            
+        #we have the encoded sequence!
+        self.save_output(self.lexicon, restore_path+"/lexicon")
+        
+        return self.lexicon
+		
+    def TrainConditionalRNNDecoderWithLexicon(self, 
+                                    restore_path = "", 
+                                    save_path = "",
+                                    display_step = 10,
+                                    quantization = 256,
+                                    ):
+        tf.reset_default_graph() 
+        
+        self.lexicon = self.load_output(restore_path+"/lexicon")   
+        input_len = len(self.lexicon[0][0])+len(self.lexicon[0][1])
+        
+        #BEGIN Graph definition
+        x2 = tf.placeholder("float", [None, input_len, 1], name="x_input")
+        y = tf.placeholder(tf.float32, [None, quantization], name="y_input")
+        
+        pred = self.GRUencoder(x2, quantization, "GRU_decoder")
+        
+        # Define loss and optimizer
+        cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(pred, y))
+        optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(cost)
+        #END Graph definition
+        
+        # Evaluate model
+        correct_pred = tf.equal(tf.argmax(pred, 1), tf.argmax(y, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
+        
+        # Initializing the variables
+        init = tf.global_variables_initializer()
+        
+        step = 1
+        
+        # 'Saver' op to save and restore all the variables
+        saver = tf.train.Saver()
+        
+        # Launch the graph
+        with tf.Session() as sess:
+            sess.run(init)
+            
+            if len(restore_path)>0 and os.path.exists(restore_path+"/rnn_decoder/model.meta"):
+                ensure_dir(restore_path+"/rnn_decoder")
+                
+                # Restore model weights from previously saved model
+                load_path=saver.restore(sess, restore_path+"/model")
+                print ("Model restored from file: %s" % load_path)  
+                
+            for i in range(self.training_iters):
+            
+                batch = []
+                labels = []
+                
+                for b in range(self.batch_size):
+                    _tuple = rand.choice (self.lexicon)
+                    sample = _tuple[0]
+                    code = _tuple[1]
+                    next_frame = Encoder.OneHot([_tuple[2]], quantization)
+                    
+                    combined_sample = []
+                    for s in sample:
+                        combined_sample.append([s])
+                    for c in code:
+                        combined_sample.append([c])
+                    
+                    batch.append(combined_sample)
+                    labels.append(next_frame)
+                
+                #batch = np.reshape(batch, (self.batch_size, input_len, 1))
+                    
+                sess.run(optimizer, feed_dict={x2: batch, y: labels})
+                
+                if step%display_step==0:
+                
+                    loss, acc = sess.run([cost, accuracy], feed_dict={x2: batch,
+                                                                          y: labels})
+                
+                    print ("Iter " + str(step) + ", Loss= " \
+                        "{:.6f}".format(loss) + ", Accuracy= " \
+                        "{:.5f}".format(acc))
+                        
+                step+=1
+            
+            if len(save_path)>0:
+                ensure_dir(save_path+"/rnn_decoder")
+                # Save model weights to disk
+                s_path = saver.save(sess, save_path+"/rnn_decoder/model")
+                print ("Model saved in file: %s" % s_path)            
+                
+    #Generates a decoded sequence using a conditionnal rnn trained from a lexicon
+    def DecodeSequenceWithRNN(self, 
+                        sample_len,
+                        feature_maps,
+                        restore_path="",
+                        display_step = 10,
+                        quantization = 256,
+                        ):
+        tf.reset_default_graph() 
+        
+        input_len = sample_len+len(feature_maps[0])
+        
+        #BEGIN Graph definition
+        x2 = tf.placeholder("float", [None, input_len, 1], name="x_input")
+        print(x2)
+        prediction = self.GRUencoder(x2, quantization, "GRU_decoder")
+        #END Graph definition
+        
+        # Initializing the variables
+        init = tf.global_variables_initializer()
+        
+        # 'Saver' op to save and restore all the variables
+        saver = tf.train.Saver()
+        
+        # Launch the graph
+        with tf.Session() as sess:
+            sess.run(init)
+            
+            if len(restore_path)>0 and os.path.exists(restore_path+"/rnn_decoder/model.meta"):
+                ensure_dir(restore_path+"/rnn_decoder")
+                
+                # Restore model weights from previously saved model
+                load_path=saver.restore(sess, restore_path+"/rnn_decoder/model")
+                print ("Model restored from file: %s" % load_path)  
+            
+            current_frame = 1
+            
+            self.result = []
+            
+            for code in feature_maps:
+                for i in range(sample_len):
+                    _input = np.concatenate((self.extract_result(current_frame+i-sample_len, current_frame+i, offset=0), code))
+                    _input = np.reshape(_input, (input_len, 1))
+                    
+                    res = sess.run(prediction, feed_dict={x2: [_input]}) 
+                    val = self.max_index(res[0])/quantization
+                    
+                    self.result.append(val)
+                    
+                    current_frame+=1
+                    
+                    if current_frame%display_step==0:
+                         clear_output()
+                         
+                         plt.plot(feature_maps, color="blue")
+                         plt.plot(self.result, color="red")
+                         plt.ylabel("Loss")
+                         plt.show()
+                        
+                         print("status: "+str(current_frame)+"/"+str(len(feature_maps)*sample_len))
+        
+            return self.result
         
     #Generates a decoded sequence from an index buffer and a feature map using n-dimentional trees
     def DecodeSequenceWithIndex(self, 

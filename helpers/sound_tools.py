@@ -510,6 +510,29 @@ class SoundLoader:
                          shuffle_rate=-1):
         return self.getNextBatch(batch_size, shuffle_rate)
 
+    def getNextFeatureBatch(self, batch_size, n_reccurent_input=0):
+        converter = self.converter
+        images = []
+        past_images = []
+        originals = []
+
+        while len(images)<batch_size:		
+            image = converter.ExtractRandomSample(fixed_size=self.fixed_size, sample_size=self.sample_size, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2+self.offset, uLawEncode = self.uLawEncode)
+            originals.append(image)
+            
+            last_start_index = converter.last_start_index
+            
+            fft_img = np.fft.fft(image)[0:self.fixed_size-1]
+            
+            images.append(fft_img)
+												
+            if n_reccurent_input !=0:
+                past_img = converter.Extract(last_start_index-n_reccurent_input, last_start_index, multiplier=self.multiplier*self.amplitude, offset=self.multiplier/2, uLawEncode = self.uLawEncode)
+                past_images.append(past_img)
+                
+        return [images, originals, past_images]
+									
+									
     def getNextBatch(self, 
                          batch_size, 
                          shuffle_rate=-1, 
@@ -675,6 +698,7 @@ class SoundLoader:
                     for u in range(len(image)):
                         image[u]+=(rand.uniform(-1, 1)*chaos_rate*(len(image)-u))/len(image)
                         image[u] = min(1, max(0, image[u]))
+               																			
                 images.append(image)
         
         if self.log:
@@ -944,7 +968,7 @@ class SoundConverter:
              
          return output
          
-     def getNormalRawAudio(self, loader):
+     def getNormalRawAudio(self, loader, multiplier = 1):
          output = []
          for i in self.data:
              output.append(i[0]*multiplier*loader.multiplier*loader.amplitude+loader.multiplier/2)
@@ -995,9 +1019,9 @@ class SoundConverter:
                     if pixel<limiter:
                         
                         if index>=len(data):
-                            val = ((data[0][0]+data[0][1])/2)*multiplier+offset
+                            val = (0)*multiplier+offset
                         else:
-                            val = ((data[index][0]+data[index][1])/2)*multiplier+offset
+                            val = (data[index][0])*multiplier+offset
                                     
                         val = max(0, min(val, 1))
                         
@@ -1318,7 +1342,7 @@ class Encoder:
             for i in range(len(dif)):
                 dif[i] = np.abs(dif[i])
                 
-            return np.average(dif)
+            return np.average(dif)*multiplier
         else:
             if(auto_thresh):
                 zero_thresh = np.average(signal)

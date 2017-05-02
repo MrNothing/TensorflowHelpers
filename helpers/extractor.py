@@ -256,6 +256,9 @@ class MinstLoader:
         self.path = path
         self.LABELS_COUNT = 10
         self.loadAllImages()
+        self.cache = {}
+        self.converter = SoundConverter("inputs/sounds/piano1.wav")
+        self.converter.data = [0]
         
     def loadAllImages(self):
         self.mnist = input_data.read_data_sets(self.path, one_hot=True)
@@ -269,7 +272,7 @@ class MinstLoader:
     def getImageWidth(self):
         return 28
         
-    def getNextBatch(self, batch_size):
+    def getNextBatch(self, batch_size, n_reccurent_input=None):
         batch_x, batch_y = self.mnist.train.next_batch(batch_size)
         return [batch_x, batch_y]
 

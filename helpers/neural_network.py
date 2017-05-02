@@ -14,41 +14,13 @@ import time
 from IPython.display import clear_output
 import pickle
 from helpers.unsupervised import AutoEncoder
+from helpers.gan import GAN
+from helpers.vae_gan import AdversarialVariationalAutoEncoder
+from helpers.vae_gan2 import AVAE
 from helpers.operators import *
 
 global layer_counter
 layer_counter={}
-
-# Create some wrappers for simplicity
-def conv1d(x, W, b, strides=1, name=""):
-    # Conv2D wrapper, with bias and relu activation
-    x = tf.nn.conv1d(x, W, stride=strides, padding='SAME', name=name)
-    x = tf.nn.bias_add(x, b)
-    return tf.nn.relu(x)
-
-def conv2d(x, W, b, strides=1, name=""):
-    # Conv2D wrapper, with bias and relu activation
-    x = tf.nn.conv2d(x, W, strides=[1, strides, strides, 1], padding='SAME', name=name)
-    x = tf.nn.bias_add(x, b)
-    return tf.nn.relu(x)
-
-def conv3d(x, W, b, strides=1, name=""):
-    # Conv3D wrapper, with bias and relu activation
-    x = tf.nn.conv3d(x, W, strides=[1, strides, strides, strides, 1], padding='SAME', name=name)
-    x = tf.nn.bias_add(x, b)
-    return tf.nn.relu(x)
-
-def maxpool1d(x, k=2, name=""):
-    # MaxPool2D wrapper
-    return tf.nn.max_pool(x, ksize=[1, k, k, 1], strides=[1, k, 1], padding='SAME', name=name)
-    
-def maxpool2d(x, k=2, name=""):
-    # MaxPool2D wrapper
-    return tf.nn.max_pool(x, ksize=[1, k, k, 1], strides=[1, k, k, 1], padding='SAME', name=name)
-    
-def maxpool3d(x, reduction_indices=[3], name=""):
-    # MaxPool3D wrapper
-    return tf.reduce_max(x, reduction_indices=reduction_indices, keep_dims=True, name=name)
 
 class ConvNet:
     def __init__(self, 
@@ -158,7 +130,7 @@ class ConvNet:
         
         # Define loss and optimizer
         cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(pred, y))
-       
+        
         # Optimizer: set up a variable that's incremented once per batch and
         # controls the learning rate decay.
         global_step = tf.Variable(0)
@@ -218,7 +190,7 @@ class ConvNet:
                     inputs = batch[0]
                     labels = batch[1]    
 
-                    self.labels_log.append(self.max_index(labels[0]))              
+                    self.labels_log.append(labels[0])              
 
                     if input_as_label:
                         
@@ -263,7 +235,7 @@ class ConvNet:
                         "{:.6f}".format(loss) + ", Accuracy= " \
                         "{:.5f}".format(acc) + ", Lrn Rate= " + str(learning_rate.eval())\
                         +" cpu: " + str(duration) + "s, gpu: " + str(gpu_duration)+"s"\
-                        +" time: "+str(mins_passed)+"mins"+" cache: "+str(int(len(self.loader.cache)/(len(self.loader.converter.data))*10000)/100)+"%"
+                        +" time: "+str(mins_passed)+"mins"+" cache: "+str(len(self.loader.cache))
                         )
                         self.acc_log.append(acc)
                         self.loss_log.append(loss)
@@ -412,6 +384,62 @@ class ConvNet:
                         plt.show()
         return output
         
+    def GenerateFeatureMap2(self, 
+                           input_data, 
+                           restore_path, 
+                           layers=None, 
+                           x=None, 
+                           display_step = 100,
+                           output_length = 1000,																	
+                           ):
+        
+        output = []
+        # tf Graph input
+        if x==None:
+           x = tf.placeholder("float", [None, self.n_steps, self.loader.z_size], name="input_x")
+        
+                
+        #y = tf.placeholder(tf.float32, [None, self.n_classes], name="classes_y")
+        #keep_prob = tf.placeholder(tf.float32) #dropout (keep probability)
+        
+        pred = self.BuildGraph(x, layers)
+        pred = tf.nn.sigmoid(pred)
+        
+         # Initializing the variables
+        self.init = tf.global_variables_initializer()
+        
+        # 'Saver' op to save and restore all the variables
+        saver = tf.train.Saver()
+        with tf.Session() as sess:
+            sess.run(self.init)
+            
+            if len(restore_path)>0 and os.path.exists(restore_path+"/model.meta"):
+                # Restore model weights from previously saved model
+                #saver = tf.train.import_meta_graph(restore_path+'/model.meta')
+                load_path=saver.restore(sess, restore_path+"/model")
+                print ("Model restored from file: %s" % load_path)           
+                #load_path=saver.restore(sess, restore_path+'/model.ckpt.data-1000-00000-of-00001')
+                
+                for i in range(output_length):
+                    #input data (right side)
+                    extract = []
+                    for k in range(self.n_steps):
+                        index = k-(self.n_steps)
+                        if index<0:
+                            extract.append([0]*self.loader.z_size)
+                        else:
+                            extract.append(input_data[index])
+                            
+                    result = sess.run(pred, feed_dict={x: [extract]}) 
+                    input_data.append(result[0])
+                    
+                    if i%display_step==0:
+                        clear_output()
+                        plt.plot(input_data)
+                        plt.ylabel("Output")
+                        plt.show()
+        return input_data
+								
     def GenerateLowLevel(self, 
                            maps, 
                            maps_samplerate,
